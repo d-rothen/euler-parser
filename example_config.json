@@ -1,0 +1,21 @@
+{
+    "datasets": [
+        {
+            "name": "ground_truth",
+            "path": "/path/to/ground_truth_dataset",
+            "depth_scale": 0.001,
+            "intrinsics": {
+                "fx": 525.0,
+                "fy": 525.0,
+                "cx": 319.5,
+                "cy": 239.5
+            }
+        },
+        {
+            "name": "predictions",
+            "path": "/path/to/predictions_dataset",
+            "output_file": "/path/to/output/metrics.json",
+            "depth_scale": 1.0
+        }
+    ]
+}
