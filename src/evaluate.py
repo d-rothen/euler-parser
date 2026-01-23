@@ -205,13 +205,16 @@ def evaluate_depth_datasets(
     normal_angle_values = []
     edge_f1_results = []
 
+    # Track entry IDs for per-file metrics
+    processed_entry_ids = []
+
     # Load all depth maps for FID/KID
     all_depths_gt = []
     all_depths_pred = []
 
     # Process each pair
     print("Computing per-image depth metrics...")
-    for gt_file, pred_file, _entry_id in tqdm(matches, desc="Processing depth pairs"):
+    for gt_file, pred_file, entry_id in tqdm(matches, desc="Processing depth pairs"):
         try:
             depth_gt = load_depth_file(gt_file, gt_depth_scale, gt_intrinsics)
             depth_pred = load_depth_file(pred_file, pred_depth_scale, pred_intrinsics)
@@ -223,6 +226,9 @@ def evaluate_depth_datasets(
 
         all_depths_gt.append(depth_gt)
         all_depths_pred.append(depth_pred)
+
+        # Track successfully processed entry ID
+        processed_entry_ids.append(entry_id)
 
         # Image quality metrics
         psnr_values.append(compute_psnr(depth_pred, depth_gt))
@@ -256,6 +262,27 @@ def evaluate_depth_datasets(
     silog_agg = aggregate_silog(silog_values)
     normal_agg = aggregate_normal_consistency(normal_angle_values)
     edge_f1_agg = aggregate_edge_f1(edge_f1_results)
+
+    # Build per-file metrics (excluding FID/KID which are distribution metrics)
+    per_file_metrics = {}
+    for i, entry_id in enumerate(processed_entry_ids):
+        absrel_arr = absrel_values[i]
+        rmse_arr = rmse_values[i]
+        normal_angles = normal_angle_values[i]
+        edge_f1 = edge_f1_results[i]
+
+        per_file_metrics[entry_id] = {
+            "psnr": float(psnr_values[i]) if np.isfinite(psnr_values[i]) else None,
+            "ssim": float(ssim_values[i]) if np.isfinite(ssim_values[i]) else None,
+            "lpips": float(lpips_values[i]),
+            "absrel_mean": float(np.mean(absrel_arr)) if len(absrel_arr) > 0 else None,
+            "rmse": float(np.sqrt(np.mean(rmse_arr))) if len(rmse_arr) > 0 else None,
+            "silog": float(silog_full_values[i]) if np.isfinite(silog_full_values[i]) else None,
+            "normal_mean_angle": float(np.mean(normal_angles)) if len(normal_angles) > 0 else None,
+            "edge_f1_precision": float(edge_f1["precision"]),
+            "edge_f1_recall": float(edge_f1["recall"]),
+            "edge_f1_f1": float(edge_f1["f1"]),
+        }
 
     results = {
         "image_quality": {
@@ -302,6 +329,7 @@ def evaluate_depth_datasets(
             "gt_path": str(gt_path),
             "pred_path": str(pred_path),
         },
+        "per_file_metrics": per_file_metrics,
     }
 
     return results
@@ -367,6 +395,11 @@ def evaluate_rgb_datasets(
     high_freq_results = []
     depth_binned_results = []
 
+    # Track entry IDs for per-file metrics
+    processed_entry_ids = []
+    # Track depth-binned results per entry (None if not available)
+    depth_binned_per_entry = []
+
     has_depth = depth_path is not None
 
     # Process each pair
@@ -380,6 +413,9 @@ def evaluate_rgb_datasets(
                 print(f"Warning: Failed to load {gt_file} or {pred_file}: {e}")
                 print(f"Might be due to incomplete prediction dataset.")
             continue
+
+        # Track successfully processed entry ID
+        processed_entry_ids.append(entry_id)
 
         # Basic image quality metrics
         psnr_values.append(compute_rgb_psnr(img_pred, img_gt))
@@ -397,17 +433,18 @@ def evaluate_rgb_datasets(
         high_freq_results.append(compute_high_freq_energy_comparison(img_pred, img_gt))
 
         # Depth-binned photometric error (if depth available)
+        depth_binned_entry = None
         if has_depth and depth_id_map is not None:
             depth_file = find_matching_depth_for_rgb_by_id(entry_id, depth_path, depth_id_map)
             if depth_file is not None:
                 try:
                     depth = load_depth_file(depth_file, depth_scale, depth_intrinsics)
-                    depth_binned_results.append(
-                        compute_depth_binned_photometric_error(img_pred, img_gt, depth)
-                    )
+                    depth_binned_entry = compute_depth_binned_photometric_error(img_pred, img_gt, depth)
+                    depth_binned_results.append(depth_binned_entry)
                 except Exception as e:
                     if verbose:
                         print(f"Warning: Failed to load depth {depth_file}: {e}")
+        depth_binned_per_entry.append(depth_binned_entry)
 
     # Aggregate results
     print("Aggregating RGB results...")
@@ -415,6 +452,34 @@ def evaluate_rgb_datasets(
     edge_f1_agg = aggregate_rgb_edge_f1(edge_f1_results)
     tail_agg = aggregate_tail_errors(tail_error_arrays)
     high_freq_agg = aggregate_high_freq_metrics(high_freq_results)
+
+    # Build per-file metrics
+    per_file_metrics = {}
+    for i, entry_id in enumerate(processed_entry_ids):
+        edge_f1 = edge_f1_results[i]
+        tail_error_arr = tail_error_arrays[i]
+        high_freq = high_freq_results[i]
+
+        entry_metrics = {
+            "psnr": float(psnr_values[i]) if np.isfinite(psnr_values[i]) else None,
+            "ssim": float(ssim_values[i]) if np.isfinite(ssim_values[i]) else None,
+            "lpips": float(lpips_values[i]),
+            "edge_f1_precision": float(edge_f1["precision"]),
+            "edge_f1_recall": float(edge_f1["recall"]),
+            "edge_f1_f1": float(edge_f1["f1"]),
+            "tail_error_p95": float(np.percentile(tail_error_arr, 95)) if len(tail_error_arr) > 0 else None,
+            "tail_error_p99": float(np.percentile(tail_error_arr, 99)) if len(tail_error_arr) > 0 else None,
+            "high_freq_pred_ratio": float(high_freq["pred_hf_ratio"]),
+            "high_freq_gt_ratio": float(high_freq["gt_hf_ratio"]),
+            "high_freq_relative_diff": float(high_freq["relative_diff"]) if np.isfinite(high_freq["relative_diff"]) else None,
+        }
+
+        # Add depth-binned metrics if available for this entry
+        depth_binned = depth_binned_per_entry[i]
+        if depth_binned is not None:
+            entry_metrics["depth_binned_error"] = depth_binned
+
+        per_file_metrics[entry_id] = entry_metrics
 
     results = {
         "image_quality": {
@@ -443,6 +508,7 @@ def evaluate_rgb_datasets(
             "gt_path": str(gt_path),
             "pred_path": str(pred_path),
         },
+        "per_file_metrics": per_file_metrics,
     }
 
     # Add depth-binned metrics if available
