@@ -451,6 +451,28 @@ def evaluate_rgb_datasets(
     Returns:
         Dictionary containing all computed RGB metrics.
     """
+    def _warn_metric_failure(metric_name: str, entry_id: str, exc: Exception) -> None:
+        print(f"Warning: Failed to compute {metric_name} for {entry_id}: {exc}")
+
+    def _safe_compute(metric_name: str, entry_id: str, func, *args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as exc:
+            _warn_metric_failure(metric_name, entry_id, exc)
+            return None
+
+    def _safe_mean(values: list[Optional[float]], metric_name: str) -> Optional[float]:
+        valid = [float(v) for v in values if v is not None and np.isfinite(v)]
+        if not valid:
+            print(f"Warning: No valid values for {metric_name}; setting to None.")
+            return None
+        return float(np.mean(valid))
+
+    def _none_if_nan(value: Optional[float]) -> Optional[float]:
+        if value is None or not np.isfinite(value):
+            return None
+        return float(value)
+
     gt_path = Path(gt_config["path"])
     pred_path = Path(pred_config["path"])
 
@@ -481,7 +503,11 @@ def evaluate_rgb_datasets(
 
     # Initialize GPU-accelerated metrics
     print(f"Initializing RGB metrics (device: {device})...")
-    lpips_metric = RGBLPIPSMetric(device=device)
+    try:
+        lpips_metric = RGBLPIPSMetric(device=device)
+    except Exception as exc:
+        print(f"Warning: Failed to initialize LPIPS metric: {exc}")
+        lpips_metric = None
 
     # Storage for per-image metrics
     psnr_values = []
@@ -496,6 +522,7 @@ def evaluate_rgb_datasets(
     processed_entry_ids = []
     # Track depth-binned results per entry (None if not available)
     depth_binned_per_entry = []
+    depth_binned_attempted = []
 
     has_depth = depth_path is not None
 
@@ -526,25 +553,53 @@ def evaluate_rgb_datasets(
         processed_entry_ids.append(entry_id)
 
         # Basic image quality metrics
-        psnr_values.append(compute_rgb_psnr(img_pred, img_gt))
-        ssim_values.append(compute_rgb_ssim(img_pred, img_gt))
-        lpips_values.append(lpips_metric.compute(img_pred, img_gt))
+        psnr_values.append(
+            _safe_compute("psnr", entry_id, compute_rgb_psnr, img_pred, img_gt)
+        )
+        ssim_values.append(
+            _safe_compute("ssim", entry_id, compute_rgb_ssim, img_pred, img_gt)
+        )
+        if lpips_metric is not None:
+            lpips_values.append(
+                _safe_compute("lpips", entry_id, lpips_metric.compute, img_pred, img_gt)
+            )
+        else:
+            lpips_values.append(None)
 
         # Edge F1
-        edge_f1_results.append(compute_rgb_edge_f1(img_pred, img_gt))
+        edge_f1_results.append(
+            _safe_compute("edge_f1", entry_id, compute_rgb_edge_f1, img_pred, img_gt)
+        )
 
         # Tail errors
-        abs_error = np.abs(img_pred - img_gt).mean(axis=-1)
-        tail_error_arrays.append(abs_error)
+        tail_error_arrays.append(
+            _safe_compute(
+                "tail_errors",
+                entry_id,
+                lambda pred, gt: np.abs(pred - gt).mean(axis=-1),
+                img_pred,
+                img_gt,
+            )
+        )
 
         # High-frequency energy
-        high_freq_results.append(compute_high_freq_energy_comparison(img_pred, img_gt))
+        high_freq_results.append(
+            _safe_compute(
+                "high_frequency",
+                entry_id,
+                compute_high_freq_energy_comparison,
+                img_pred,
+                img_gt,
+            )
+        )
 
         # Depth-binned photometric error (if depth available)
         depth_binned_entry = None
+        depth_binned_attempt = False
         if has_depth and depth_id_map is not None:
             depth_file = find_matching_depth_for_rgb_by_id(entry_id, depth_path, depth_id_map)
             if depth_file is not None:
+                depth_binned_attempt = True
                 try:
                     depth = load_depth_file(depth_file, depth_scale, depth_intrinsics)
                     if target_dim is not None:
@@ -558,16 +613,37 @@ def evaluate_rgb_datasets(
                     depth_binned_entry = compute_depth_binned_photometric_error(img_pred, img_gt, depth)
                     depth_binned_results.append(depth_binned_entry)
                 except Exception as e:
-                    if verbose:
-                        print(f"Warning: Failed to load depth {depth_file}: {e}")
+                    _warn_metric_failure("depth_binned_photometric", entry_id, e)
         depth_binned_per_entry.append(depth_binned_entry)
+        depth_binned_attempted.append(depth_binned_attempt)
 
     # Aggregate results
     print("Aggregating RGB results...")
 
-    edge_f1_agg = aggregate_rgb_edge_f1(edge_f1_results)
-    tail_agg = aggregate_tail_errors(tail_error_arrays)
-    high_freq_agg = aggregate_high_freq_metrics(high_freq_results)
+    edge_f1_valid = [r for r in edge_f1_results if r is not None]
+    if edge_f1_valid:
+        edge_f1_agg = aggregate_rgb_edge_f1(edge_f1_valid)
+    else:
+        print("Warning: No valid edge_f1 results; setting aggregate to None.")
+        edge_f1_agg = {"precision": None, "recall": None, "f1": None}
+
+    tail_valid = [r for r in tail_error_arrays if r is not None]
+    if tail_valid:
+        tail_agg = aggregate_tail_errors(tail_valid)
+    else:
+        print("Warning: No valid tail_errors results; setting aggregate to None.")
+        tail_agg = {"p95": None, "p99": None}
+
+    high_freq_valid = [r for r in high_freq_results if r is not None]
+    if high_freq_valid:
+        high_freq_agg = aggregate_high_freq_metrics(high_freq_valid)
+    else:
+        print("Warning: No valid high_frequency results; setting aggregate to None.")
+        high_freq_agg = {
+            "pred_hf_ratio_mean": None,
+            "gt_hf_ratio_mean": None,
+            "relative_diff_mean": None,
+        }
 
     # Build per-file metrics
     per_file_metrics = {}
@@ -577,45 +653,49 @@ def evaluate_rgb_datasets(
         high_freq = high_freq_results[i]
 
         entry_metrics = {
-            "psnr": float(psnr_values[i]) if np.isfinite(psnr_values[i]) else None,
-            "ssim": float(ssim_values[i]) if np.isfinite(ssim_values[i]) else None,
-            "lpips": float(lpips_values[i]),
-            "edge_f1_precision": float(edge_f1["precision"]),
-            "edge_f1_recall": float(edge_f1["recall"]),
-            "edge_f1_f1": float(edge_f1["f1"]),
-            "tail_error_p95": float(np.percentile(tail_error_arr, 95)) if len(tail_error_arr) > 0 else None,
-            "tail_error_p99": float(np.percentile(tail_error_arr, 99)) if len(tail_error_arr) > 0 else None,
-            "high_freq_pred_ratio": float(high_freq["pred_hf_ratio"]),
-            "high_freq_gt_ratio": float(high_freq["gt_hf_ratio"]),
-            "high_freq_relative_diff": float(high_freq["relative_diff"]) if np.isfinite(high_freq["relative_diff"]) else None,
+            "psnr": _none_if_nan(psnr_values[i]),
+            "ssim": _none_if_nan(ssim_values[i]),
+            "lpips": _none_if_nan(lpips_values[i]),
+            "edge_f1_precision": _none_if_nan(edge_f1["precision"]) if edge_f1 else None,
+            "edge_f1_recall": _none_if_nan(edge_f1["recall"]) if edge_f1 else None,
+            "edge_f1_f1": _none_if_nan(edge_f1["f1"]) if edge_f1 else None,
+            "tail_error_p95": float(np.percentile(tail_error_arr, 95))
+            if tail_error_arr is not None and len(tail_error_arr) > 0
+            else None,
+            "tail_error_p99": float(np.percentile(tail_error_arr, 99))
+            if tail_error_arr is not None and len(tail_error_arr) > 0
+            else None,
+            "high_freq_pred_ratio": _none_if_nan(high_freq["pred_hf_ratio"]) if high_freq else None,
+            "high_freq_gt_ratio": _none_if_nan(high_freq["gt_hf_ratio"]) if high_freq else None,
+            "high_freq_relative_diff": _none_if_nan(high_freq["relative_diff"]) if high_freq else None,
         }
 
         # Add depth-binned metrics if available for this entry
         depth_binned = depth_binned_per_entry[i]
-        if depth_binned is not None:
+        if depth_binned is not None or depth_binned_attempted[i]:
             entry_metrics["depth_binned_error"] = depth_binned
 
         per_file_metrics[entry_id] = entry_metrics
 
     results = {
         "image_quality": {
-            "psnr_mean": float(np.mean([v for v in psnr_values if np.isfinite(v)])),
-            "ssim_mean": float(np.mean([v for v in ssim_values if np.isfinite(v)])),
-            "lpips_mean": float(np.mean(lpips_values)),
+            "psnr_mean": _safe_mean(psnr_values, "psnr_mean"),
+            "ssim_mean": _safe_mean(ssim_values, "ssim_mean"),
+            "lpips_mean": _safe_mean(lpips_values, "lpips_mean"),
         },
         "edge_f1": {
-            "precision": edge_f1_agg["precision"],
-            "recall": edge_f1_agg["recall"],
-            "f1": edge_f1_agg["f1"],
+            "precision": _none_if_nan(edge_f1_agg["precision"]),
+            "recall": _none_if_nan(edge_f1_agg["recall"]),
+            "f1": _none_if_nan(edge_f1_agg["f1"]),
         },
         "tail_errors": {
-            "p95": tail_agg["p95"],
-            "p99": tail_agg["p99"],
+            "p95": _none_if_nan(tail_agg["p95"]),
+            "p99": _none_if_nan(tail_agg["p99"]),
         },
         "high_frequency": {
-            "pred_hf_ratio_mean": high_freq_agg["pred_hf_ratio_mean"],
-            "gt_hf_ratio_mean": high_freq_agg["gt_hf_ratio_mean"],
-            "relative_diff_mean": high_freq_agg["relative_diff_mean"],
+            "pred_hf_ratio_mean": _none_if_nan(high_freq_agg["pred_hf_ratio_mean"]),
+            "gt_hf_ratio_mean": _none_if_nan(high_freq_agg["gt_hf_ratio_mean"]),
+            "relative_diff_mean": _none_if_nan(high_freq_agg["relative_diff_mean"]),
         },
         "dataset_info": {
             "num_pairs": len(matches),
@@ -631,6 +711,9 @@ def evaluate_rgb_datasets(
     if depth_binned_results:
         depth_binned_agg = aggregate_depth_binned_errors(depth_binned_results)
         results["depth_binned_photometric"] = depth_binned_agg
+    elif has_depth:
+        print("Warning: No valid depth_binned_photometric results; setting aggregate to None.")
+        results["depth_binned_photometric"] = None
 
     return results
 
