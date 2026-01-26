@@ -37,6 +37,7 @@ from .depth_edge_f1 import compute_depth_edge_f1, aggregate_edge_f1
 # RGB metrics
 from .rgb_psnr_ssim import compute_rgb_psnr, compute_rgb_ssim, compute_rgb_psnr_masked
 from .rgb_lpips import compute_rgb_lpips, RGBLPIPSMetric
+from .daniel_error import compute_sce
 from .depth_binned_error import (
     compute_depth_binned_mae,
     compute_depth_binned_mse,
@@ -103,6 +104,7 @@ __all__ = [
     "compute_rgb_psnr_masked",
     "compute_rgb_lpips",
     "RGBLPIPSMetric",
+    "compute_sce",
     # RGB depth-binned metrics
     "compute_depth_binned_mae",
     "compute_depth_binned_mse",

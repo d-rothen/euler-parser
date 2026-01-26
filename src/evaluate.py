@@ -347,6 +347,7 @@ from .metrics import (
     compute_rgb_psnr,
     compute_rgb_ssim,
     RGBLPIPSMetric,
+    compute_sce,
     compute_depth_binned_photometric_error,
     aggregate_depth_binned_errors,
     compute_rgb_edge_f1,
@@ -633,6 +634,7 @@ def evaluate_depth_datasets(
     psnr_values = []
     ssim_values = []
     lpips_values = []
+    sce_values = []
 
     absrel_values = []
     rmse_values = []
@@ -1035,6 +1037,9 @@ def evaluate_rgb_datasets(
         ssim_values.append(
             _safe_compute("ssim", entry_id, compute_rgb_ssim, img_pred, img_gt)
         )
+        sce_values.append(
+            _safe_compute("sce", entry_id, compute_sce, img_pred, img_gt)
+        )
         if lpips_metric is not None:
             lpips_values.append(
                 _safe_compute("lpips", entry_id, lpips_metric.compute, img_pred, img_gt)
@@ -1171,6 +1176,7 @@ def evaluate_rgb_datasets(
             "image_quality": {
                 "psnr": _none_if_nan(psnr_values[i]),
                 "ssim": _none_if_nan(ssim_values[i]),
+                "sce": _none_if_nan(sce_values[i]),
                 "lpips": _none_if_nan(lpips_values[i]),
             },
             "edge_f1": {
@@ -1207,6 +1213,7 @@ def evaluate_rgb_datasets(
         "image_quality": {
             "psnr": _safe_mean(psnr_values, "psnr"),
             "ssim": _safe_mean(ssim_values, "ssim"),
+            "sce": _safe_mean(sce_values, "sce"),
             "lpips": _safe_mean(lpips_values, "lpips"),
         },
         "edge_f1": {
@@ -1314,6 +1321,7 @@ def evaluate_single_rgb_pair(
         "image_quality": {
             "psnr": compute_rgb_psnr(img_pred, img_gt),
             "ssim": compute_rgb_ssim(img_pred, img_gt),
+            "sce": compute_sce(img_pred, img_gt),
             "lpips": lpips_metric.compute(img_pred, img_gt),
         },
         "edge_f1": compute_rgb_edge_f1(img_pred, img_gt),
