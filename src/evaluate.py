@@ -13,6 +13,317 @@ from PIL import Image
 from .utils.hierarchy_parser import get_matches, set_value
 from .sanity_checker import SanityChecker
 
+
+def _get_dtype_precision_str(arr: np.ndarray) -> str:
+    """Get a human-readable precision string for numpy dtype."""
+    dtype = arr.dtype
+    if dtype == np.float16:
+        return "16-bit float"
+    elif dtype == np.float32:
+        return "32-bit float"
+    elif dtype == np.float64:
+        return "64-bit float"
+    elif dtype == np.uint8:
+        return "8-bit unsigned int"
+    elif dtype == np.uint16:
+        return "16-bit unsigned int"
+    elif dtype == np.int32:
+        return "32-bit signed int"
+    elif dtype == np.int64:
+        return "64-bit signed int"
+    else:
+        return str(dtype)
+
+
+def _compute_array_stats(arr: np.ndarray) -> dict:
+    """Compute statistics for a numpy array."""
+    valid_mask = np.isfinite(arr)
+    valid_values = arr[valid_mask]
+
+    if len(valid_values) == 0:
+        return {
+            "shape": arr.shape,
+            "dtype": str(arr.dtype),
+            "precision": _get_dtype_precision_str(arr),
+            "total_size": arr.size,
+            "min": float("nan"),
+            "max": float("nan"),
+            "mean": float("nan"),
+            "p90": float("nan"),
+            "valid_count": 0,
+        }
+
+    return {
+        "shape": arr.shape,
+        "dtype": str(arr.dtype),
+        "precision": _get_dtype_precision_str(arr),
+        "total_size": arr.size,
+        "min": float(np.min(valid_values)),
+        "max": float(np.max(valid_values)),
+        "mean": float(np.mean(valid_values)),
+        "p90": float(np.percentile(valid_values, 90)),
+        "valid_count": len(valid_values),
+    }
+
+
+def _format_stats_block(stats: dict, label: str) -> str:
+    """Format statistics as a displayable block."""
+    lines = [
+        f"{label}",
+        "─" * 77,
+        f"  Shape:      {stats['shape']}",
+        f"  Dtype:      {stats['dtype']}",
+        f"  Total Size: {stats['total_size']} elements",
+        f"  Min:        {stats['min']:.4f}",
+        f"  Max:        {stats['max']:.4f}",
+        f"  Mean:       {stats['mean']:.4f}",
+        f"  P90:        {stats['p90']:.4f}",
+        f"  Precision:  {stats['precision']}",
+    ]
+    return "\n".join(lines)
+
+
+def _assess_depth_normalization(
+    gt_stats: dict,
+    pred_stats: dict,
+    gt_depth_scale: float,
+    pred_depth_scale: float,
+) -> list[str]:
+    """Assess whether depth datasets appear properly normalized."""
+    assessments = []
+
+    # Typical depth ranges after normalization to meters
+    # For most scenes, we expect depths between 0.1m and 100m
+    typical_min = 0.1
+    typical_max = 100.0
+
+    # Check GT dataset
+    gt_max = gt_stats["max"]
+    gt_min = gt_stats["min"]
+
+    if gt_max > 1000:
+        assessments.append(
+            f"  [!] GT: Max value {gt_max:.2f} is very high. "
+            f"If depth_scale={gt_depth_scale}, raw values reach {gt_max/gt_depth_scale:.2f}. "
+            f"Consider if depth_scale is correct."
+        )
+    elif gt_max < 0.01:
+        assessments.append(
+            f"  [!] GT: Max value {gt_max:.4f} is very low. "
+            f"Depths may need a larger depth_scale (currently {gt_depth_scale})."
+        )
+    elif typical_min <= gt_min and gt_max <= typical_max:
+        assessments.append(
+            f"  [OK] GT: Values [{gt_min:.2f}, {gt_max:.2f}]m appear reasonable for metric depth."
+        )
+    else:
+        assessments.append(
+            f"  [~] GT: Values [{gt_min:.2f}, {gt_max:.2f}]m - verify depth_scale={gt_depth_scale} is correct."
+        )
+
+    # Check Pred dataset
+    pred_max = pred_stats["max"]
+    pred_min = pred_stats["min"]
+
+    if pred_max > 1000:
+        assessments.append(
+            f"  [!] Pred: Max value {pred_max:.2f} is very high. "
+            f"If depth_scale={pred_depth_scale}, raw values reach {pred_max/pred_depth_scale:.2f}. "
+            f"Consider if depth_scale is correct."
+        )
+    elif pred_max < 0.01:
+        assessments.append(
+            f"  [!] Pred: Max value {pred_max:.4f} is very low. "
+            f"Depths may need a larger depth_scale (currently {pred_depth_scale})."
+        )
+    elif typical_min <= pred_min and pred_max <= typical_max:
+        assessments.append(
+            f"  [OK] Pred: Values [{pred_min:.2f}, {pred_max:.2f}]m appear reasonable for metric depth."
+        )
+    else:
+        assessments.append(
+            f"  [~] Pred: Values [{pred_min:.2f}, {pred_max:.2f}]m - verify depth_scale={pred_depth_scale} is correct."
+        )
+
+    # Check if GT and Pred are in similar ranges (important for meaningful metrics)
+    if gt_max > 0 and pred_max > 0:
+        range_ratio = max(gt_max, pred_max) / max(min(gt_max, pred_max), 1e-6)
+        if range_ratio > 10:
+            assessments.append(
+                f"  [!] Large range mismatch: GT max={gt_max:.2f}, Pred max={pred_max:.2f}. "
+                f"Check depth_scale settings."
+            )
+
+    return assessments
+
+
+def _assess_rgb_normalization(
+    gt_stats: dict,
+    pred_stats: dict,
+    gt_pixel_value_max: float,
+    pred_pixel_value_max: float,
+) -> list[str]:
+    """Assess whether RGB datasets appear properly normalized."""
+    assessments = []
+
+    # After normalization by pixel_value_max, RGB should be in [0, 1]
+    gt_max = gt_stats["max"]
+    gt_min = gt_stats["min"]
+    pred_max = pred_stats["max"]
+    pred_min = pred_stats["min"]
+
+    # Check GT
+    if gt_max > 1.1:
+        assessments.append(
+            f"  [!] GT: Max value {gt_max:.4f} > 1.0. "
+            f"pixel_value_max={gt_pixel_value_max} may be too low for the input data."
+        )
+    elif gt_min < -0.1:
+        assessments.append(
+            f"  [!] GT: Min value {gt_min:.4f} < 0. Unexpected negative values in RGB."
+        )
+    elif 0.0 <= gt_min and gt_max <= 1.0:
+        assessments.append(
+            f"  [OK] GT: Values in [{gt_min:.4f}, {gt_max:.4f}], properly normalized to [0, 1]."
+        )
+    else:
+        assessments.append(
+            f"  [~] GT: Values [{gt_min:.4f}, {gt_max:.4f}] - slightly outside [0, 1], may be acceptable."
+        )
+
+    # Check Pred
+    if pred_max > 1.1:
+        assessments.append(
+            f"  [!] Pred: Max value {pred_max:.4f} > 1.0. "
+            f"pixel_value_max={pred_pixel_value_max} may be too low for the input data."
+        )
+    elif pred_min < -0.1:
+        assessments.append(
+            f"  [!] Pred: Min value {pred_min:.4f} < 0. Unexpected negative values in RGB."
+        )
+    elif 0.0 <= pred_min and pred_max <= 1.0:
+        assessments.append(
+            f"  [OK] Pred: Values in [{pred_min:.4f}, {pred_max:.4f}], properly normalized to [0, 1]."
+        )
+    else:
+        assessments.append(
+            f"  [~] Pred: Values [{pred_min:.4f}, {pred_max:.4f}] - slightly outside [0, 1], may be acceptable."
+        )
+
+    return assessments
+
+
+def log_depth_dataset_stats(
+    gt_file: Path,
+    pred_file: Path,
+    gt_config: dict,
+    pred_config: dict,
+    gt_depth_scale: float,
+    pred_depth_scale: float,
+    gt_intrinsics: Optional[dict],
+    pred_intrinsics: Optional[dict],
+) -> None:
+    """Load sample files and log dataset statistics for depth datasets."""
+    from .metrics import load_depth_file
+
+    print()
+    print("═" * 77)
+    print("                     DEPTH DATASET SAMPLE STATISTICS")
+    print("═" * 77)
+    print()
+
+    # Load sample files
+    gt_depth = load_depth_file(gt_file, gt_depth_scale, gt_intrinsics)
+    pred_depth = load_depth_file(pred_file, pred_depth_scale, pred_intrinsics)
+
+    # Compute stats
+    gt_stats = _compute_array_stats(gt_depth)
+    pred_stats = _compute_array_stats(pred_depth)
+
+    # Print GT stats
+    print(_format_stats_block(gt_stats, f"Ground Truth: {gt_config['name']}"))
+    print()
+
+    # Print Pred stats
+    print(_format_stats_block(pred_stats, f"Prediction: {pred_config['name']}"))
+    print()
+
+    # Configuration and assessment
+    print("Configuration & Normalization Assessment")
+    print("─" * 77)
+    print(f"  GT depth_scale:   {gt_depth_scale}")
+    print(f"  Pred depth_scale: {pred_depth_scale}")
+    if gt_intrinsics:
+        print(f"  GT intrinsics:    fx={gt_intrinsics.get('fx')}, fy={gt_intrinsics.get('fy')}, "
+              f"cx={gt_intrinsics.get('cx')}, cy={gt_intrinsics.get('cy')}")
+    if pred_intrinsics:
+        print(f"  Pred intrinsics:  fx={pred_intrinsics.get('fx')}, fy={pred_intrinsics.get('fy')}, "
+              f"cx={pred_intrinsics.get('cx')}, cy={pred_intrinsics.get('cy')}")
+    print()
+
+    # Normalization assessment
+    assessments = _assess_depth_normalization(
+        gt_stats, pred_stats, gt_depth_scale, pred_depth_scale
+    )
+    for assessment in assessments:
+        print(assessment)
+
+    print()
+    print("═" * 77)
+    print()
+
+
+def log_rgb_dataset_stats(
+    gt_file: Path,
+    pred_file: Path,
+    gt_config: dict,
+    pred_config: dict,
+    gt_pixel_value_max: float,
+    pred_pixel_value_max: float,
+) -> None:
+    """Load sample files and log dataset statistics for RGB datasets."""
+    from .metrics import load_rgb_file
+
+    print()
+    print("═" * 77)
+    print("                      RGB DATASET SAMPLE STATISTICS")
+    print("═" * 77)
+    print()
+
+    # Load sample files
+    gt_rgb = load_rgb_file(gt_file, gt_pixel_value_max)
+    pred_rgb = load_rgb_file(pred_file, pred_pixel_value_max)
+
+    # Compute stats
+    gt_stats = _compute_array_stats(gt_rgb)
+    pred_stats = _compute_array_stats(pred_rgb)
+
+    # Print GT stats
+    print(_format_stats_block(gt_stats, f"Ground Truth: {gt_config['name']}"))
+    print()
+
+    # Print Pred stats
+    print(_format_stats_block(pred_stats, f"Prediction: {pred_config['name']}"))
+    print()
+
+    # Configuration and assessment
+    print("Configuration & Normalization Assessment")
+    print("─" * 77)
+    print(f"  GT pixel_value_max:   {gt_pixel_value_max}")
+    print(f"  Pred pixel_value_max: {pred_pixel_value_max}")
+    print()
+
+    # Normalization assessment
+    assessments = _assess_rgb_normalization(
+        gt_stats, pred_stats, gt_pixel_value_max, pred_pixel_value_max
+    )
+    for assessment in assessments:
+        print(assessment)
+
+    print()
+    print("═" * 77)
+    print()
+
 from .metrics import (
     # Depth utilities and metrics
     load_depth_file,
@@ -296,6 +607,22 @@ def evaluate_depth_datasets(
         raise ValueError(f"No matching depth files found between {gt_path} and {pred_path}")
 
     print(f"Found {len(matches)} matching depth file pairs")
+
+    # Log sample statistics for first matched pair before metric computation
+    first_match = matches[0]
+    try:
+        log_depth_dataset_stats(
+            gt_file=first_match["gt_file"],
+            pred_file=first_match["pred_file"],
+            gt_config=gt_config,
+            pred_config=pred_config,
+            gt_depth_scale=gt_depth_scale,
+            pred_depth_scale=pred_depth_scale,
+            gt_intrinsics=gt_intrinsics,
+            pred_intrinsics=pred_intrinsics,
+        )
+    except Exception as e:
+        print(f"Warning: Could not log dataset statistics: {e}")
 
     # Initialize GPU-accelerated metrics
     print(f"Initializing depth metrics (device: {device})...")
@@ -626,6 +953,20 @@ def evaluate_rgb_datasets(
         raise ValueError(f"No matching RGB files found between {gt_path} and {pred_path}")
 
     print(f"Found {len(matches)} matching RGB file pairs")
+
+    # Log sample statistics for first matched pair before metric computation
+    first_match = matches[0]
+    try:
+        log_rgb_dataset_stats(
+            gt_file=first_match["gt_file"],
+            pred_file=first_match["pred_file"],
+            gt_config=gt_config,
+            pred_config=pred_config,
+            gt_pixel_value_max=gt_pixel_value_max,
+            pred_pixel_value_max=pred_pixel_value_max,
+        )
+    except Exception as e:
+        print(f"Warning: Could not log dataset statistics: {e}")
 
     # Initialize GPU-accelerated metrics
     print(f"Initializing RGB metrics (device: {device})...")
