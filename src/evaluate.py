@@ -208,12 +208,13 @@ def _resize_rgb_image(
     target_h: int,
     target_w: int,
     resample: int,
+    pixel_value_max: float = 255.0,
 ) -> np.ndarray:
-    img_uint8 = np.clip(np.round(img * 255.0), 0, 255).astype(np.uint8)
+    img_uint8 = np.clip(np.round(img * pixel_value_max), 0, 255).astype(np.uint8)
     resized = Image.fromarray(img_uint8, mode="RGB").resize(
         (target_w, target_h), resample=resample
     )
-    return np.asarray(resized).astype(np.float32) / 255.0
+    return np.asarray(resized).astype(np.float32) / pixel_value_max
 
 
 def _resize_depth_map(
@@ -228,7 +229,9 @@ def _resize_depth_map(
 
 
 def _adjust_rgb_gt_dimensions(
-    img_gt: np.ndarray, target_dim: tuple[int, int]
+    img_gt: np.ndarray,
+    target_dim: tuple[int, int],
+    pixel_value_max: float = 255.0,
 ) -> np.ndarray:
     target_h, target_w = target_dim
     height, width = img_gt.shape[:2]
@@ -238,7 +241,7 @@ def _adjust_rgb_gt_dimensions(
         # Small reductions are cropped to avoid interpolation artifacts.
         return _center_crop(img_gt, target_h, target_w)
     resample = Image.LANCZOS if target_h < height or target_w < width else Image.BICUBIC
-    return _resize_rgb_image(img_gt, target_h, target_w, resample)
+    return _resize_rgb_image(img_gt, target_h, target_w, resample, pixel_value_max)
 
 
 def _adjust_depth_to_rgb_dimensions(
@@ -596,6 +599,9 @@ def evaluate_rgb_datasets(
     gt_path = Path(gt_config["path"])
     pred_path = Path(pred_config["path"])
 
+    gt_pixel_value_max = gt_config.get("pixel_value_max", 255.0)
+    pred_pixel_value_max = pred_config.get("pixel_value_max", 255.0)
+
     target_dim = _validate_target_dim(pred_config.get("dim"))
     if target_dim is not None:
         print(f"Applying RGB GT preprocessing to target dim: {target_dim[0]}x{target_dim[1]}")
@@ -655,8 +661,8 @@ def evaluate_rgb_datasets(
         entry_id = match["id"]
 
         try:
-            img_gt = load_rgb_file(gt_file)
-            img_pred = load_rgb_file(pred_file)
+            img_gt = load_rgb_file(gt_file, gt_pixel_value_max)
+            img_pred = load_rgb_file(pred_file, pred_pixel_value_max)
         except Exception as e:
             if verbose:
                 print(f"Warning: Failed to load {gt_file} or {pred_file}: {e}")
@@ -664,7 +670,7 @@ def evaluate_rgb_datasets(
             continue
 
         if target_dim is not None:
-            img_gt = _adjust_rgb_gt_dimensions(img_gt, target_dim)
+            img_gt = _adjust_rgb_gt_dimensions(img_gt, target_dim, gt_pixel_value_max)
 
         if img_gt.shape != img_pred.shape:
             if verbose:

@@ -50,6 +50,7 @@ def load_depth_file(
 
 def load_rgb_file(
     file_path: Union[str, Path],
+    pixel_value_max: float = 255.0,
 ) -> np.ndarray:
     """Load an RGB image file.
 
@@ -57,6 +58,7 @@ def load_rgb_file(
 
     Args:
         file_path: Path to the RGB file.
+        pixel_value_max: Maximum pixel value for normalization (default 255.0).
 
     Returns:
         RGB image as a float32 array in [0, 1] range with shape (H, W, 3).
@@ -71,7 +73,7 @@ def load_rgb_file(
         raise ValueError(f"Unsupported RGB file format: {suffix}")
 
     img = Image.open(file_path).convert("RGB")
-    rgb = np.array(img).astype(np.float32) / 255.0
+    rgb = np.array(img).astype(np.float32) / pixel_value_max
 
     return rgb
 

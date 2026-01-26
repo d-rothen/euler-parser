@@ -58,6 +58,11 @@ def validate_dataset_config(
             if key not in intrinsics:
                 raise ValueError(f"{name} intrinsics missing '{key}'")
 
+    if "pixel_value_max" in dataset:
+        pixel_value_max = dataset["pixel_value_max"]
+        if not isinstance(pixel_value_max, (int, float)) or pixel_value_max <= 0:
+            raise ValueError(f"{name}: pixel_value_max must be a positive number")
+
 
 def load_config(config_path: str) -> dict:
     """Load and validate configuration from JSON file.

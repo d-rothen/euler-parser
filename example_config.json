@@ -34,13 +34,15 @@
     "rgb": {
         "gt_dataset": {
             "name": "rgb_ground_truth",
-            "path": "/path/to/rgb_gt_dataset"
+            "path": "/path/to/rgb_gt_dataset",
+            "pixel_value_max": 255
         },
         "datasets": [
             {
                 "name": "rgb_model_a",
                 "path": "/path/to/rgb_model_a",
                 "dim": [368, 1240],
+                "pixel_value_max": 255,
                 "output_file": "/path/to/output/rgb_model_a_metrics.json"
             },
             {
