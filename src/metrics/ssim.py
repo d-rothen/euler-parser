@@ -1,7 +1,7 @@
 """Structural Similarity Index (SSIM) metric for depth maps."""
 
 import numpy as np
-from typing import Optional
+from typing import Optional, Union
 from scipy import ndimage
 
 
@@ -12,7 +12,8 @@ def compute_ssim(
     k1: float = 0.01,
     k2: float = 0.03,
     valid_mask: Optional[np.ndarray] = None,
-) -> float:
+    return_metadata: bool = False,
+) -> Union[float, tuple[float, dict]]:
     """Compute SSIM between predicted and ground truth depth maps.
 
     Args:
@@ -22,22 +23,39 @@ def compute_ssim(
         k1: SSIM constant for luminance.
         k2: SSIM constant for contrast.
         valid_mask: Optional mask of valid pixels to consider.
+        return_metadata: If True, return (ssim, metadata) tuple for sanity checking.
 
     Returns:
         SSIM value in [0, 1]. Higher is better.
+        If return_metadata is True, returns (ssim, metadata_dict).
     """
     if valid_mask is None:
         valid_mask = (depth_gt > 0) & (depth_pred > 0)
         valid_mask = valid_mask & np.isfinite(depth_gt) & np.isfinite(depth_pred)
 
+    metadata = {
+        "valid_pixel_count": int(np.sum(valid_mask)),
+        "depth_range": None,
+        "depth_min": None,
+        "depth_max": None,
+    }
+
     if not valid_mask.any():
+        if return_metadata:
+            return 0.0, metadata
         return 0.0
 
     # Normalize depths to [0, 1] for SSIM computation
     valid_min = min(depth_pred[valid_mask].min(), depth_gt[valid_mask].min())
     valid_max = max(depth_pred[valid_mask].max(), depth_gt[valid_mask].max())
 
+    metadata["depth_min"] = float(valid_min)
+    metadata["depth_max"] = float(valid_max)
+    metadata["depth_range"] = float(valid_max - valid_min)
+
     if valid_max - valid_min < 1e-8:
+        if return_metadata:
+            return 1.0, metadata  # Constant images are identical
         return 1.0  # Constant images are identical
 
     pred_norm = (depth_pred - valid_min) / (valid_max - valid_min)
@@ -90,9 +108,14 @@ def compute_ssim(
     weight_mask = weight_mask > 0.5  # Threshold to get regions with enough valid pixels
 
     if not weight_mask.any():
+        if return_metadata:
+            return 0.0, metadata
         return 0.0
 
-    return float(np.mean(ssim_map[weight_mask]))
+    ssim_value = float(np.mean(ssim_map[weight_mask]))
+    if return_metadata:
+        return ssim_value, metadata
+    return ssim_value
 
 
 def compute_ssim_batch(

@@ -1,7 +1,7 @@
 """PSNR and SSIM metrics for RGB images."""
 
 import numpy as np
-from typing import Optional
+from typing import Optional, Union
 from scipy import ndimage
 
 
@@ -9,24 +9,39 @@ def compute_rgb_psnr(
     img_pred: np.ndarray,
     img_gt: np.ndarray,
     max_val: float = 1.0,
-) -> float:
+    return_metadata: bool = False,
+) -> Union[float, tuple[float, dict]]:
     """Compute PSNR between predicted and ground truth RGB images.
 
     Args:
         img_pred: Predicted RGB image in [0, 1] range, shape (H, W, 3).
         img_gt: Ground truth RGB image in [0, 1] range, shape (H, W, 3).
         max_val: Maximum pixel value (default 1.0 for normalized images).
+        return_metadata: If True, return (psnr, metadata) tuple for sanity checking.
 
     Returns:
         PSNR value in dB. Higher is better.
+        If return_metadata is True, returns (psnr, metadata_dict).
     """
+    metadata = {
+        "rgb_pred_min": float(img_pred.min()),
+        "rgb_pred_max": float(img_pred.max()),
+        "rgb_gt_min": float(img_gt.min()),
+        "rgb_gt_max": float(img_gt.max()),
+        "max_val_used": max_val,
+    }
+
     mse = np.mean((img_pred - img_gt) ** 2)
 
     if mse < 1e-10:
-        return float("inf")
+        psnr = float("inf")
+    else:
+        psnr = 10 * np.log10((max_val**2) / mse)
+        psnr = float(psnr)
 
-    psnr = 10 * np.log10((max_val**2) / mse)
-    return float(psnr)
+    if return_metadata:
+        return psnr, metadata
+    return psnr
 
 
 def compute_rgb_ssim(
@@ -35,7 +50,8 @@ def compute_rgb_ssim(
     window_size: int = 11,
     k1: float = 0.01,
     k2: float = 0.03,
-) -> float:
+    return_metadata: bool = False,
+) -> Union[float, tuple[float, dict]]:
     """Compute SSIM between predicted and ground truth RGB images.
 
     Computes SSIM per channel and averages.
@@ -46,10 +62,19 @@ def compute_rgb_ssim(
         window_size: Size of the Gaussian window.
         k1: SSIM constant for luminance.
         k2: SSIM constant for contrast.
+        return_metadata: If True, return (ssim, metadata) tuple for sanity checking.
 
     Returns:
         SSIM value in [0, 1]. Higher is better.
+        If return_metadata is True, returns (ssim, metadata_dict).
     """
+    metadata = {
+        "rgb_pred_min": float(img_pred.min()),
+        "rgb_pred_max": float(img_pred.max()),
+        "rgb_gt_min": float(img_gt.min()),
+        "rgb_gt_max": float(img_gt.max()),
+    }
+
     # SSIM constants
     L = 1.0  # Dynamic range for [0, 1] images
     c1 = (k1 * L) ** 2
@@ -93,7 +118,11 @@ def compute_rgb_ssim(
         ssim_map = numerator / denominator
         ssim_per_channel.append(np.mean(ssim_map))
 
-    return float(np.mean(ssim_per_channel))
+    ssim_value = float(np.mean(ssim_per_channel))
+
+    if return_metadata:
+        return ssim_value, metadata
+    return ssim_value
 
 
 def compute_rgb_psnr_masked(

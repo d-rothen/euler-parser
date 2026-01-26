@@ -4,7 +4,7 @@ Computes surface normals from depth maps and measures their consistency.
 """
 
 import numpy as np
-from typing import Optional
+from typing import Optional, Union
 from scipy import ndimage
 
 
@@ -135,7 +135,8 @@ def compute_normal_angles(
     depth_gt: np.ndarray,
     valid_mask: Optional[np.ndarray] = None,
     focal_length: float = 1.0,
-) -> np.ndarray:
+    return_metadata: bool = False,
+) -> Union[np.ndarray, tuple[np.ndarray, dict]]:
     """Compute per-pixel angular errors between normals for aggregation.
 
     Args:
@@ -143,13 +144,17 @@ def compute_normal_angles(
         depth_gt: Ground truth depth map in meters.
         valid_mask: Optional mask of valid pixels to consider.
         focal_length: Focal length for normal computation.
+        return_metadata: If True, return (angles, metadata) tuple for sanity checking.
 
     Returns:
         Array of angular errors in degrees for valid pixels.
+        If return_metadata is True, returns (angles_array, metadata_dict).
     """
     if valid_mask is None:
         valid_mask = (depth_gt > 0) & (depth_pred > 0)
         valid_mask = valid_mask & np.isfinite(depth_gt) & np.isfinite(depth_pred)
+
+    initial_valid_count = int(np.sum(valid_mask))
 
     normals_pred = depth_to_normals(depth_pred, focal_length, valid_mask)
     normals_gt = depth_to_normals(depth_gt, focal_length, valid_mask)
@@ -158,15 +163,31 @@ def compute_normal_angles(
     from scipy.ndimage import binary_erosion
 
     kernel = np.ones((3, 3), dtype=bool)
-    valid_mask = binary_erosion(valid_mask, kernel)
+    eroded_mask = binary_erosion(valid_mask, kernel)
+    valid_mask = eroded_mask if eroded_mask is not None else valid_mask
+
+    valid_after_erosion = int(np.sum(valid_mask))
+
+    metadata = {
+        "valid_pixels_before_erosion": initial_valid_count,
+        "valid_pixels_after_erosion": valid_after_erosion,
+        "focal_length_used": focal_length,
+        "mean_angle": None,
+    }
 
     if not valid_mask.any():
+        if return_metadata:
+            return np.array([]), metadata
         return np.array([])
 
     dot_products = np.sum(normals_pred * normals_gt, axis=2)
     dot_products = np.clip(dot_products[valid_mask], -1.0, 1.0)
     angles = np.arccos(dot_products) * 180.0 / np.pi
 
+    metadata["mean_angle"] = float(np.mean(angles))
+
+    if return_metadata:
+        return angles, metadata
     return angles
 
 

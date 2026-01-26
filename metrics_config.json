@@ -1,0 +1,93 @@
+{
+  "depth": {
+    "expected_range": {
+      "min": 0.0,
+      "max": 100.0,
+      "description": "Expected depth range in meters"
+    },
+    "psnr": {
+      "expected_max_val": 100.0,
+      "warn_if_max_exceeds": 100.0,
+      "warn_if_max_below": 0.1,
+      "description": "PSNR uses max depth value for dynamic range calculation"
+    },
+    "ssim": {
+      "min_valid_range": 0.1,
+      "description": "Minimum depth range (max-min) for meaningful SSIM; below this indicates uniform depth"
+    },
+    "lpips": {
+      "min_valid_range": 0.1,
+      "description": "Minimum depth range for meaningful LPIPS perceptual comparison"
+    },
+    "absrel": {
+      "warn_if_median_exceeds": 1.0,
+      "warn_if_p90_exceeds": 2.0,
+      "description": "AbsRel is |pred-gt|/gt; values > 1.0 mean error exceeds GT depth"
+    },
+    "rmse": {
+      "warn_if_exceeds_fraction_of_range": 0.5,
+      "description": "RMSE warning if error exceeds 50% of the depth range"
+    },
+    "silog": {
+      "warn_if_exceeds": 0.5,
+      "description": "Scale-invariant log error; values > 0.5 indicate significant scale mismatch"
+    },
+    "normal_consistency": {
+      "warn_if_mean_angle_exceeds": 45.0,
+      "warn_if_valid_pixels_below": 100,
+      "expected_focal_length": 1.0,
+      "description": "Surface normal angular error in degrees; high values indicate geometric mismatch"
+    },
+    "depth_edge_f1": {
+      "edge_threshold": 0.1,
+      "edge_method": "relative",
+      "pixel_tolerance": 1,
+      "warn_if_edge_ratio_below": 0.001,
+      "warn_if_edge_ratio_above": 0.5,
+      "description": "Depth edge detection parameters and expected edge density"
+    }
+  },
+  "rgb": {
+    "expected_range": {
+      "min": 0.0,
+      "max": 1.0,
+      "description": "RGB values should be normalized to [0, 1]"
+    },
+    "psnr": {
+      "max_val": 1.0,
+      "warn_if_below": 10.0,
+      "warn_if_above": 60.0,
+      "description": "RGB PSNR in dB; values outside 10-60 range are unusual"
+    },
+    "ssim": {
+      "warn_if_below": 0.3,
+      "description": "SSIM below 0.3 indicates very poor structural similarity"
+    },
+    "lpips": {
+      "warn_if_exceeds": 0.7,
+      "description": "LPIPS > 0.7 indicates very poor perceptual similarity"
+    },
+    "edge_f1": {
+      "edge_threshold": 0.1,
+      "edge_method": "sobel",
+      "pixel_tolerance": 1,
+      "warn_if_f1_below": 0.1,
+      "description": "Edge F1 parameters; F1 < 0.1 indicates poor edge preservation"
+    },
+    "tail_errors": {
+      "warn_if_p99_exceeds": 0.5,
+      "description": "Tail error p99 > 0.5 indicates significant outlier errors"
+    },
+    "high_freq_energy": {
+      "cutoff_ratio": 0.25,
+      "warn_if_relative_diff_below": -0.5,
+      "description": "High-freq energy; relative_diff < -0.5 indicates excessive smoothing"
+    },
+    "depth_binned": {
+      "near_threshold": 1.0,
+      "far_threshold": 5.0,
+      "warn_if_bin_empty": true,
+      "description": "Depth bin thresholds in meters"
+    }
+  }
+}

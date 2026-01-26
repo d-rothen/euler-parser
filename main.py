@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from src.evaluate import evaluate_depth_datasets, evaluate_rgb_datasets
+from src.sanity_checker import SanityChecker
 
 
 def validate_dataset_config(
@@ -198,6 +199,17 @@ def main():
         action="store_true",
         help="Skip RGB evaluation",
     )
+    parser.add_argument(
+        "--no-sanity-check",
+        action="store_true",
+        help="Disable sanity checking of metric configurations",
+    )
+    parser.add_argument(
+        "--metrics-config",
+        type=str,
+        default=None,
+        help="Path to metrics_config.json for sanity checking (default: auto-detect)",
+    )
 
     args = parser.parse_args()
 
@@ -209,6 +221,16 @@ def main():
         sys.exit(1)
 
     print(f"Device: {args.device}")
+    print("-" * 60)
+
+    # Initialize sanity checker if not disabled
+    sanity_checker = None
+    if not args.no_sanity_check:
+        config_path = Path(args.metrics_config) if args.metrics_config else None
+        sanity_checker = SanityChecker(config_path)
+        print("Sanity checking enabled")
+    else:
+        print("Sanity checking disabled")
     print("-" * 60)
 
     # Get depth GT config for RGB depth-binned metrics
@@ -234,6 +256,7 @@ def main():
                 batch_size=args.batch_size,
                 num_workers=args.num_workers,
                 verbose=args.verbose,
+                sanity_checker=sanity_checker,
             )
 
             output_path = save_results(
@@ -261,6 +284,7 @@ def main():
                 batch_size=args.batch_size,
                 num_workers=args.num_workers,
                 verbose=args.verbose,
+                sanity_checker=sanity_checker,
             )
 
             output_path = save_results(
@@ -268,6 +292,17 @@ def main():
             )
             print(f"  Results saved to: {output_path}")
             print_results(results, f"RGB: {dataset_config['name']}")
+
+    # Print sanity check report at the end
+    if sanity_checker is not None:
+        sanity_checker.print_report()
+
+        # Save sanity check report to file
+        report = sanity_checker.get_full_report()
+        report_path = Path("sanity_check_report.json")
+        with open(report_path, "w") as f:
+            json.dump(report, f, indent=2)
+        print(f"\nSanity check report saved to: {report_path}")
 
 
 if __name__ == "__main__":

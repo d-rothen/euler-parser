@@ -147,12 +147,19 @@ def compute_depth_edge_f1(
 
     precision, recall, f1 = compute_edge_f1(edges_pred, edges_gt, pixel_tolerance)
 
+    total_pixels = depth_gt.size
+    pred_edge_count = int(np.sum(edges_pred))
+    gt_edge_count = int(np.sum(edges_gt))
+
     return {
         "precision": precision,
         "recall": recall,
         "f1": f1,
-        "pred_edge_pixels": int(np.sum(edges_pred)),
-        "gt_edge_pixels": int(np.sum(edges_gt)),
+        "pred_edge_pixels": pred_edge_count,
+        "gt_edge_pixels": gt_edge_count,
+        "total_pixels": total_pixels,
+        "pred_edge_ratio": pred_edge_count / total_pixels if total_pixels > 0 else 0.0,
+        "gt_edge_ratio": gt_edge_count / total_pixels if total_pixels > 0 else 0.0,
     }
 
 

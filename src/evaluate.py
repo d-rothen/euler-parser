@@ -11,6 +11,7 @@ from tqdm import tqdm
 from PIL import Image
 
 from .utils.hierarchy_parser import get_matches, set_value
+from .sanity_checker import SanityChecker
 
 from .metrics import (
     # Depth utilities and metrics
@@ -259,6 +260,7 @@ def evaluate_depth_datasets(
     batch_size: int = 16,
     num_workers: int = 4,
     verbose: bool = False,
+    sanity_checker: Optional[SanityChecker] = None,
 ) -> dict:
     """Evaluate all depth metrics between GT and prediction datasets.
 
@@ -269,6 +271,7 @@ def evaluate_depth_datasets(
         batch_size: Batch size for batched metrics.
         num_workers: Number of data loading workers.
         verbose: Enable verbose output.
+        sanity_checker: Optional SanityChecker for post-processing validation.
 
     Returns:
         Dictionary containing all computed metrics.
@@ -316,6 +319,12 @@ def evaluate_depth_datasets(
     all_depths_gt = []
     all_depths_pred = []
 
+    # Storage for sanity check metadata
+    psnr_metadata_list = []
+    ssim_metadata_list = []
+    absrel_metadata_list = []
+    normal_metadata_list = []
+
     # Process each pair
     print("Computing per-image depth metrics...")
     for match in tqdm(matches, desc="Processing depth pairs"):
@@ -339,19 +348,35 @@ def evaluate_depth_datasets(
         # Track successfully processed entry (hierarchy + id)
         processed_entries.append({"hierarchy": hierarchy, "id": entry_id})
 
-        # Image quality metrics
-        psnr_values.append(compute_psnr(depth_pred, depth_gt))
-        ssim_values.append(compute_ssim(depth_pred, depth_gt))
+        # Validate depth input if sanity checker is enabled
+        if sanity_checker is not None:
+            sanity_checker.validate_depth_input(depth_gt, depth_pred, entry_id)
+
+        # Image quality metrics (with metadata for sanity checking)
+        psnr_val, psnr_meta = compute_psnr(depth_pred, depth_gt, return_metadata=True)
+        psnr_values.append(psnr_val)
+        psnr_metadata_list.append(psnr_meta)
+
+        ssim_val, ssim_meta = compute_ssim(depth_pred, depth_gt, return_metadata=True)
+        ssim_values.append(ssim_val)
+        ssim_metadata_list.append(ssim_meta)
+
         lpips_values.append(lpips_metric.compute(depth_pred, depth_gt))
 
-        # Depth-specific metrics
-        absrel_values.append(compute_absrel(depth_pred, depth_gt))
+        # Depth-specific metrics (with metadata for sanity checking)
+        absrel_arr, absrel_meta = compute_absrel(depth_pred, depth_gt, return_metadata=True)
+        absrel_values.append(absrel_arr)
+        absrel_metadata_list.append(absrel_meta)
+
         rmse_values.append(compute_rmse_per_pixel(depth_pred, depth_gt))
         silog_values.append(compute_silog_per_pixel(depth_pred, depth_gt))
         silog_full_values.append(compute_scale_invariant_log_error(depth_pred, depth_gt))
 
-        # Geometric metrics
-        normal_angle_values.append(compute_normal_angles(depth_pred, depth_gt))
+        # Geometric metrics (with metadata for sanity checking)
+        normal_angles, normal_meta = compute_normal_angles(depth_pred, depth_gt, return_metadata=True)
+        normal_angle_values.append(normal_angles)
+        normal_metadata_list.append(normal_meta)
+
         edge_f1_results.append(compute_depth_edge_f1(depth_pred, depth_gt))
 
     # Compute FID and KID
@@ -371,6 +396,64 @@ def evaluate_depth_datasets(
     silog_agg = aggregate_silog(silog_values)
     normal_agg = aggregate_normal_consistency(normal_angle_values)
     edge_f1_agg = aggregate_edge_f1(edge_f1_results)
+
+    # Post-processing sanity checks (does not impact GPU computation)
+    if sanity_checker is not None:
+        print("Running post-processing sanity checks...")
+        for i, entry in enumerate(processed_entries):
+            entry_id = entry["id"]
+
+            # Validate PSNR
+            psnr_meta = psnr_metadata_list[i]
+            if psnr_meta["max_val_used"] is not None:
+                sanity_checker.validate_depth_psnr(
+                    psnr_values[i], psnr_meta["max_val_used"], entry_id
+                )
+
+            # Validate SSIM
+            ssim_meta = ssim_metadata_list[i]
+            if ssim_meta["depth_range"] is not None:
+                sanity_checker.validate_depth_ssim(
+                    ssim_values[i], ssim_meta["depth_range"], entry_id
+                )
+
+            # Validate AbsRel
+            absrel_meta = absrel_metadata_list[i]
+            if absrel_meta["median"] is not None:
+                sanity_checker.validate_depth_absrel(
+                    absrel_meta["median"], absrel_meta["p90"], entry_id
+                )
+
+            # Validate RMSE
+            if ssim_meta["depth_range"] is not None and len(rmse_values[i]) > 0:
+                rmse_val = float(np.sqrt(np.mean(rmse_values[i])))
+                sanity_checker.validate_depth_rmse(
+                    rmse_val, ssim_meta["depth_range"], entry_id
+                )
+
+            # Validate SILog
+            silog_val = silog_full_values[i]
+            if np.isfinite(silog_val):
+                sanity_checker.validate_depth_silog(silog_val, entry_id)
+
+            # Validate Normal Consistency
+            normal_meta = normal_metadata_list[i]
+            if normal_meta["mean_angle"] is not None:
+                sanity_checker.validate_normal_consistency(
+                    normal_meta["mean_angle"],
+                    normal_meta["valid_pixels_after_erosion"],
+                    entry_id
+                )
+
+            # Validate Depth Edge F1
+            edge_f1 = edge_f1_results[i]
+            sanity_checker.validate_depth_edge_f1(
+                edge_f1["pred_edge_pixels"],
+                edge_f1["gt_edge_pixels"],
+                edge_f1["total_pixels"],
+                edge_f1["f1"],
+                entry_id
+            )
 
     # Build per-file metrics (excluding FID/KID which are distribution metrics)
     per_file_metrics = {}
@@ -471,6 +554,7 @@ def evaluate_rgb_datasets(
     batch_size: int = 16,
     num_workers: int = 4,
     verbose: bool = False,
+    sanity_checker: Optional[SanityChecker] = None,
 ) -> dict:
     """Evaluate all RGB metrics between GT and prediction datasets.
 
@@ -482,6 +566,7 @@ def evaluate_rgb_datasets(
         batch_size: Batch size for batched metrics.
         num_workers: Number of data loading workers.
         verbose: Enable verbose output.
+        sanity_checker: Optional SanityChecker for post-processing validation.
 
     Returns:
         Dictionary containing all computed RGB metrics.
@@ -592,6 +677,10 @@ def evaluate_rgb_datasets(
         # Track successfully processed entry (hierarchy + id)
         processed_entries.append({"hierarchy": hierarchy, "id": entry_id})
 
+        # Validate RGB input if sanity checker is enabled
+        if sanity_checker is not None:
+            sanity_checker.validate_rgb_input(img_gt, img_pred, entry_id)
+
         # Basic image quality metrics
         psnr_values.append(
             _safe_compute("psnr", entry_id, compute_rgb_psnr, img_pred, img_gt)
@@ -684,6 +773,43 @@ def evaluate_rgb_datasets(
             "gt_hf_ratio_mean": None,
             "relative_diff_mean": None,
         }
+
+    # Post-processing sanity checks for RGB (does not impact GPU computation)
+    if sanity_checker is not None:
+        print("Running post-processing sanity checks for RGB...")
+        for i, entry in enumerate(processed_entries):
+            entry_id = entry["id"]
+
+            # Validate RGB PSNR
+            psnr_val = psnr_values[i]
+            if psnr_val is not None and np.isfinite(psnr_val):
+                sanity_checker.validate_rgb_psnr(psnr_val, entry_id)
+
+            # Validate RGB SSIM
+            ssim_val = ssim_values[i]
+            if ssim_val is not None and np.isfinite(ssim_val):
+                sanity_checker.validate_rgb_ssim(ssim_val, entry_id)
+
+            # Validate RGB LPIPS
+            lpips_val = lpips_values[i]
+            if lpips_val is not None and np.isfinite(lpips_val):
+                sanity_checker.validate_rgb_lpips(lpips_val, entry_id)
+
+            # Validate tail errors
+            tail_arr = tail_error_arrays[i]
+            if tail_arr is not None and len(tail_arr) > 0:
+                p99 = float(np.percentile(tail_arr, 99))
+                sanity_checker.validate_tail_errors(p99, entry_id)
+
+            # Validate high-frequency energy
+            hf_result = high_freq_results[i]
+            if hf_result is not None and np.isfinite(hf_result.get("relative_diff", float("nan"))):
+                sanity_checker.validate_high_freq_energy(hf_result["relative_diff"], entry_id)
+
+            # Validate depth-binned metrics
+            depth_binned = depth_binned_per_entry[i]
+            if depth_binned is not None:
+                sanity_checker.validate_depth_binned(depth_binned, entry_id)
 
     # Build per-file metrics
     per_file_metrics = {}
