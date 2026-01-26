@@ -986,6 +986,7 @@ def evaluate_rgb_datasets(
     tail_error_arrays = []
     high_freq_results = []
     depth_binned_results = []
+    sce_values = []
 
     # Track entries (hierarchy + id) for per-file metrics
     processed_entries = []
