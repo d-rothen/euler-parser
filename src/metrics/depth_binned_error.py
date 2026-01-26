@@ -35,14 +35,14 @@ def compute_depth_binned_mae(
         if mask.any():
             results[bin_name] = float(np.mean(abs_error[mask]))
         else:
-            results[bin_name] = float("nan")
+            results[bin_name] = 0.0
 
     # Overall MAE
     valid_mask = bins["near"] | bins["mid"] | bins["far"]
     if valid_mask.any():
         results["all"] = float(np.mean(abs_error[valid_mask]))
     else:
-        results["all"] = float("nan")
+        results["all"] = 0.0
 
     return results
 
@@ -77,14 +77,14 @@ def compute_depth_binned_mse(
         if mask.any():
             results[bin_name] = float(np.mean(sq_error[mask]))
         else:
-            results[bin_name] = float("nan")
+            results[bin_name] = 0.0
 
     # Overall MSE
     valid_mask = bins["near"] | bins["mid"] | bins["far"]
     if valid_mask.any():
         results["all"] = float(np.mean(sq_error[valid_mask]))
     else:
-        results["all"] = float("nan")
+        results["all"] = 0.0
 
     return results
 
