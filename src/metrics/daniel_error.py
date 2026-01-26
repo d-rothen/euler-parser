@@ -43,10 +43,13 @@ def compute_sce(
     gt_gray = 0.299 * img_gt[:, :, 0] + 0.587 * img_gt[:, :, 1] + 0.114 * img_gt[:, :, 2]
 
     if use_scharr_filter:
-        dx_pred = ndimage.scharr(pred_gray, axis=1)
-        dy_pred = ndimage.scharr(pred_gray, axis=0)
-        dx_gt = ndimage.scharr(gt_gray, axis=1)
-        dy_gt = ndimage.scharr(gt_gray, axis=0)
+        # Scharr kernels for x and y gradients
+        scharr_x = np.array([[-3, 0, 3], [-10, 0, 10], [-3, 0, 3]]) / 16.0
+        scharr_y = np.array([[-3, -10, -3], [0, 0, 0], [3, 10, 3]]) / 16.0
+        dx_pred = ndimage.convolve(pred_gray, scharr_x)
+        dy_pred = ndimage.convolve(pred_gray, scharr_y)
+        dx_gt = ndimage.convolve(gt_gray, scharr_x)
+        dy_gt = ndimage.convolve(gt_gray, scharr_y)
     else:
         dx_pred = ndimage.sobel(pred_gray, axis=1)
         dy_pred = ndimage.sobel(pred_gray, axis=0)
