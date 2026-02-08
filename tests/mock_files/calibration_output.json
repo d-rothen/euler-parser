@@ -1,0 +1,19 @@
+{
+  "name": "VKITTI2",
+  "type": "calibration",
+  "meta": {},
+  "dataset": {
+    "children": {
+      "Scene01": {
+        "files": [
+          {"path": "Scene01/intrinsics.txt", "id": "intrinsics"}
+        ]
+      },
+      "Scene02": {
+        "files": [
+          {"path": "Scene02/intrinsics.txt", "id": "intrinsics"}
+        ]
+      }
+    }
+  }
+}

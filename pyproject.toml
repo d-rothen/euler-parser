@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "depth-eval"
-version = "0.1.0"
+version = "0.2.0"
 description = "Depth map evaluation toolkit with comprehensive metrics"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,6 +31,8 @@ dependencies = [
     "torchvision>=0.10.0",
     "lpips>=0.1.4",
     "tqdm>=4.62.0",
+    "euler-loading",
+    "ds-crawler",
 ]
 
 [project.optional-dependencies]

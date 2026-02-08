@@ -1,0 +1,33 @@
+{
+  "name": "VKITTI2",
+  "type": "depth",
+  "meta": {
+    "scale_to_meters": 0.01,
+    "radial_depth": false
+  },
+  "dataset": {
+    "children": {
+      "Scene01": {
+        "children": {
+          "clone": {
+            "files": [
+              {"path": "Scene01/clone/depth_00000.npy", "id": "00000"},
+              {"path": "Scene01/clone/depth_00001.npy", "id": "00001"},
+              {"path": "Scene01/clone/depth_00002.npy", "id": "00002"}
+            ]
+          }
+        }
+      },
+      "Scene02": {
+        "children": {
+          "clone": {
+            "files": [
+              {"path": "Scene02/clone/depth_00000.npy", "id": "00000"},
+              {"path": "Scene02/clone/depth_00001.npy", "id": "00001"}
+            ]
+          }
+        }
+      }
+    }
+  }
+}

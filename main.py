@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Main entry point for depth and RGB evaluation.
 
-Parses config.json and runs evaluation between datasets.
+Parses config.json and runs evaluation using euler_loading datasets.
 """
 
 import argparse
@@ -9,59 +9,56 @@ import json
 import sys
 from pathlib import Path
 
-from src.evaluate import evaluate_depth_datasets, evaluate_rgb_datasets
+from src.data import (
+    DEFAULT_LOADER,
+    build_depth_eval_dataset,
+    build_rgb_eval_dataset,
+    get_depth_metadata,
+    get_rgb_metadata,
+    load_loader_module,
+)
+from src.evaluate import evaluate_depth_samples, evaluate_rgb_samples
 from src.sanity_checker import SanityChecker
 
 
-def validate_dataset_config(
-    dataset: dict,
-    name: str,
-    allow_output: bool = True,
-    allow_dim: bool = False,
-) -> None:
-    """Validate a single dataset configuration.
-
-    Args:
-        dataset: Dataset configuration dictionary.
-        name: Name for error messages.
-        allow_output: Whether output_file is allowed.
+def validate_gt_config(gt: dict) -> None:
+    """Validate the ``gt`` section of the configuration.
 
     Raises:
-        ValueError: If configuration is invalid.
+        ValueError: If required fields are missing or paths do not exist.
     """
-    if "name" not in dataset:
-        raise ValueError(f"{name} must have a 'name' field")
-    if "path" not in dataset:
-        raise ValueError(f"{name} must have a 'path' field")
+    if "rgb" not in gt or "path" not in gt["rgb"]:
+        raise ValueError("gt.rgb.path is required")
+    if "depth" not in gt or "path" not in gt["depth"]:
+        raise ValueError("gt.depth.path is required")
 
-    path = Path(dataset["path"])
-    if not path.exists():
-        raise ValueError(f"Dataset path does not exist: {path}")
+    for modality in ("rgb", "depth", "segmentation", "calibration"):
+        if modality in gt:
+            p = Path(gt[modality]["path"])
+            if not p.exists():
+                raise ValueError(f"gt.{modality}.path does not exist: {p}")
 
-    if not allow_output and "output_file" in dataset:
-        raise ValueError(f"{name}: output_file is only allowed on non-GT datasets")
 
-    if "dim" in dataset:
-        if not allow_dim:
-            raise ValueError(f"{name}: dim is only allowed on rgb.datasets entries")
-        dim = dataset["dim"]
-        if not isinstance(dim, list) or len(dim) != 2:
-            raise ValueError(f"{name}: dim must be a list like [height, width]")
-        for value in dim:
-            if not isinstance(value, (int, float)) or value <= 0 or int(value) != value:
-                raise ValueError(f"{name}: dim values must be positive integers")
+def validate_dataset_entry(entry: dict, index: int) -> None:
+    """Validate a single prediction dataset entry.
 
-    if "intrinsics" in dataset:
-        intrinsics = dataset["intrinsics"]
-        required_keys = ["fx", "fy", "cx", "cy"]
-        for key in required_keys:
-            if key not in intrinsics:
-                raise ValueError(f"{name} intrinsics missing '{key}'")
+    Raises:
+        ValueError: If the entry is malformed.
+    """
+    label = f"datasets[{index}]"
+    if "name" not in entry:
+        raise ValueError(f"{label} must have a 'name' field")
 
-    if "pixel_value_max" in dataset:
-        pixel_value_max = dataset["pixel_value_max"]
-        if not isinstance(pixel_value_max, (int, float)) or pixel_value_max <= 0:
-            raise ValueError(f"{name}: pixel_value_max must be a positive number")
+    has_rgb = "rgb" in entry and "path" in entry.get("rgb", {})
+    has_depth = "depth" in entry and "path" in entry.get("depth", {})
+    if not has_rgb and not has_depth:
+        raise ValueError(f"{label} must have at least 'rgb.path' or 'depth.path'")
+
+    for modality in ("rgb", "depth"):
+        if modality in entry and "path" in entry[modality]:
+            p = Path(entry[modality]["path"])
+            if not p.exists():
+                raise ValueError(f"{label}.{modality}.path does not exist: {p}")
 
 
 def load_config(config_path: str) -> dict:
@@ -79,56 +76,37 @@ def load_config(config_path: str) -> dict:
     with open(config_path, "r") as f:
         config = json.load(f)
 
-    # Validate depth section if present
-    if "depth" in config:
-        depth_config = config["depth"]
-        if "gt_dataset" not in depth_config:
-            raise ValueError("depth section must have 'gt_dataset'")
-        if "datasets" not in depth_config:
-            raise ValueError("depth section must have 'datasets' array")
+    if "gt" not in config:
+        raise ValueError("Config must contain a 'gt' section")
+    if "datasets" not in config or not config["datasets"]:
+        raise ValueError("Config must contain a non-empty 'datasets' array")
 
-        validate_dataset_config(
-            depth_config["gt_dataset"], "depth.gt_dataset", allow_output=False
-        )
-        for i, dataset in enumerate(depth_config["datasets"]):
-            validate_dataset_config(dataset, f"depth.datasets[{i}]", allow_output=True)
-
-    # Validate RGB section if present
-    if "rgb" in config:
-        rgb_config = config["rgb"]
-        if "gt_dataset" not in rgb_config:
-            raise ValueError("rgb section must have 'gt_dataset'")
-        if "datasets" not in rgb_config:
-            raise ValueError("rgb section must have 'datasets' array")
-
-        validate_dataset_config(
-            rgb_config["gt_dataset"], "rgb.gt_dataset", allow_output=False
-        )
-        for i, dataset in enumerate(rgb_config["datasets"]):
-            validate_dataset_config(
-                dataset, f"rgb.datasets[{i}]", allow_output=True, allow_dim=True
-            )
-
-    if "depth" not in config and "rgb" not in config:
-        raise ValueError("Config must contain at least 'depth' or 'rgb' section")
+    validate_gt_config(config["gt"])
+    for i, entry in enumerate(config["datasets"]):
+        validate_dataset_entry(entry, i)
 
     return config
 
 
-def save_results(results: dict, dataset_config: dict, default_path: Path) -> Path:
+def save_results(results: dict, dataset_config: dict) -> Path:
     """Save results to output file.
 
     Args:
         results: Results dictionary.
-        dataset_config: Dataset configuration.
-        default_path: Default path if output_file not specified.
+        dataset_config: Dataset configuration entry.
 
     Returns:
         Path where results were saved.
     """
     output_file = dataset_config.get("output_file")
     if output_file is None:
-        output_file = default_path / "eval.json"
+        # Default: save alongside first available modality path
+        for modality in ("depth", "rgb"):
+            if modality in dataset_config and "path" in dataset_config[modality]:
+                output_file = Path(dataset_config[modality]["path"]) / "eval.json"
+                break
+        if output_file is None:
+            output_file = Path("eval.json")
     else:
         output_file = Path(output_file)
 
@@ -162,12 +140,24 @@ def print_results(results: dict, title: str) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate depth and RGB datasets"
+        description="Evaluate depth and RGB datasets using euler_loading"
     )
     parser.add_argument(
         "config",
         type=str,
         help="Path to config.json file",
+    )
+    parser.add_argument(
+        "--gt-loader",
+        type=str,
+        default=None,
+        help=f"Loader module for GT datasets (default: {DEFAULT_LOADER})",
+    )
+    parser.add_argument(
+        "--pred-loader",
+        type=str,
+        default=None,
+        help="Loader module for prediction datasets (default: same as --gt-loader)",
     )
     parser.add_argument(
         "--device",
@@ -205,6 +195,11 @@ def main():
         help="Skip RGB evaluation",
     )
     parser.add_argument(
+        "--mask-sky",
+        action="store_true",
+        help="Mask sky regions from metrics using GT segmentation",
+    )
+    parser.add_argument(
         "--no-sanity-check",
         action="store_true",
         help="Disable sanity checking of metric configurations",
@@ -225,7 +220,32 @@ def main():
         print(f"Error loading config: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # Load loader modules
+    gt_loader_path = args.gt_loader or DEFAULT_LOADER
+    pred_loader_path = args.pred_loader or gt_loader_path
+    try:
+        loader_gt = load_loader_module(gt_loader_path)
+        loader_pred = load_loader_module(pred_loader_path)
+    except (ImportError, TypeError) as e:
+        print(f"Error loading loader module: {e}", file=sys.stderr)
+        sys.exit(1)
+
     print(f"Device: {args.device}")
+    print(f"GT loader: {gt_loader_path}")
+    print(f"Pred loader: {pred_loader_path}")
+    print("-" * 60)
+
+    # Check sky masking prerequisites
+    if args.mask_sky:
+        if "segmentation" not in config["gt"]:
+            print(
+                "Warning: --mask-sky requires gt.segmentation in config. "
+                "Sky masking disabled.",
+                file=sys.stderr,
+            )
+            args.mask_sky = False
+        else:
+            print("Sky masking enabled")
     print("-" * 60)
 
     # Initialize sanity checker if not disabled
@@ -238,79 +258,124 @@ def main():
         print("Sanity checking disabled")
     print("-" * 60)
 
-    # Get depth GT config for RGB depth-binned metrics
-    depth_gt_config = None
-    if "depth" in config:
-        depth_gt_config = config["depth"]["gt_dataset"]
+    gt = config["gt"]
+    gt_depth_path = gt["depth"]["path"]
+    gt_rgb_path = gt["rgb"]["path"]
+    calibration_path = gt.get("calibration", {}).get("path")
+    segmentation_path = gt.get("segmentation", {}).get("path") if args.mask_sky else None
 
-    # Evaluate depth datasets
-    if "depth" in config and not args.skip_depth:
-        depth_config = config["depth"]
-        gt_config = depth_config["gt_dataset"]
+    # Evaluate each prediction dataset
+    for dataset_config in config["datasets"]:
+        ds_name = dataset_config["name"]
+        has_depth = "depth" in dataset_config and "path" in dataset_config["depth"]
+        has_rgb = "rgb" in dataset_config and "path" in dataset_config["rgb"]
 
-        print(f"\n[DEPTH] Ground Truth: '{gt_config['name']}' ({gt_config['path']})")
+        all_results = {}
 
-        for dataset_config in depth_config["datasets"]:
-            print(f"\n[DEPTH] Evaluating: '{dataset_config['name']}'")
-            print(f"  Path: {dataset_config['path']}")
+        # -- Depth evaluation --
+        if has_depth and not args.skip_depth:
+            pred_depth_path = dataset_config["depth"]["path"]
+            print(f"\n[DEPTH] Evaluating: '{ds_name}'")
+            print(f"  GT:   {gt_depth_path}")
+            print(f"  Pred: {pred_depth_path}")
 
-            results = evaluate_depth_datasets(
-                gt_config=gt_config,
-                pred_config=dataset_config,
+            depth_dataset = build_depth_eval_dataset(
+                gt_depth_path=gt_depth_path,
+                pred_depth_path=pred_depth_path,
+                loader_gt=loader_gt,
+                loader_pred=loader_pred,
+                calibration_path=calibration_path,
+                segmentation_path=segmentation_path,
+            )
+
+            depth_meta = get_depth_metadata(depth_dataset)
+            print(f"  scale_to_meters: {depth_meta['scale_to_meters']}")
+            print(f"  radial_depth: {depth_meta['radial_depth']}")
+            print(f"  Matched pairs: {len(depth_dataset)}")
+
+            depth_results = evaluate_depth_samples(
+                dataset=depth_dataset,
+                scale_to_meters=depth_meta["scale_to_meters"],
+                is_radial=depth_meta["radial_depth"],
+                gt_name=gt.get("name", "GT"),
+                pred_name=ds_name,
                 device=args.device,
                 batch_size=args.batch_size,
                 num_workers=args.num_workers,
                 verbose=args.verbose,
                 sanity_checker=sanity_checker,
+                sky_mask_enabled=args.mask_sky,
             )
 
-            # Print intermediate sanity check report for this dataset pair
             if sanity_checker is not None:
-                sanity_checker.print_pair_report(dataset_config["name"], is_depth=True)
+                sanity_checker.print_pair_report(ds_name, is_depth=True)
 
-            output_path = save_results(
-                results, dataset_config, Path(dataset_config["path"])
+            all_results["depth"] = depth_results.get("depth", {})
+            all_results.setdefault("per_file_metrics", {}).update(
+                depth_results.get("per_file_metrics", {})
             )
-            print(f"  Results saved to: {output_path}")
-            print_results(results, f"DEPTH: {dataset_config['name']}")
+            print_results(
+                {k: v for k, v in depth_results.items() if k != "per_file_metrics"},
+                f"DEPTH: {ds_name}",
+            )
 
-    # Evaluate RGB datasets
-    if "rgb" in config and not args.skip_rgb:
-        rgb_config = config["rgb"]
-        gt_config = rgb_config["gt_dataset"]
+        # -- RGB evaluation --
+        if has_rgb and not args.skip_rgb:
+            pred_rgb_path = dataset_config["rgb"]["path"]
+            print(f"\n[RGB] Evaluating: '{ds_name}'")
+            print(f"  GT:   {gt_rgb_path}")
+            print(f"  Pred: {pred_rgb_path}")
 
-        print(f"\n[RGB] Ground Truth: '{gt_config['name']}' ({gt_config['path']})")
+            rgb_dataset = build_rgb_eval_dataset(
+                gt_rgb_path=gt_rgb_path,
+                pred_rgb_path=pred_rgb_path,
+                loader_gt=loader_gt,
+                loader_pred=loader_pred,
+                gt_depth_path=gt_depth_path,
+                calibration_path=calibration_path,
+                segmentation_path=segmentation_path,
+            )
 
-        for dataset_config in rgb_config["datasets"]:
-            print(f"\n[RGB] Evaluating: '{dataset_config['name']}'")
-            print(f"  Path: {dataset_config['path']}")
+            rgb_meta = get_rgb_metadata(rgb_dataset)
+            print(f"  rgb_range: {rgb_meta['rgb_range']}")
+            print(f"  Matched pairs: {len(rgb_dataset)}")
 
-            results = evaluate_rgb_datasets(
-                gt_config=gt_config,
-                pred_config=dataset_config,
-                depth_gt_config=depth_gt_config,
+            depth_meta = get_depth_metadata(rgb_dataset) if "gt_depth" in rgb_dataset.modality_paths() else None
+
+            rgb_results = evaluate_rgb_samples(
+                dataset=rgb_dataset,
+                depth_meta=depth_meta,
+                gt_name=gt.get("name", "GT"),
+                pred_name=ds_name,
                 device=args.device,
                 batch_size=args.batch_size,
                 num_workers=args.num_workers,
                 verbose=args.verbose,
                 sanity_checker=sanity_checker,
+                sky_mask_enabled=args.mask_sky,
             )
 
-            # Print intermediate sanity check report for this dataset pair
             if sanity_checker is not None:
-                sanity_checker.print_pair_report(dataset_config["name"], is_depth=False)
+                sanity_checker.print_pair_report(ds_name, is_depth=False)
 
-            output_path = save_results(
-                results, dataset_config, Path(dataset_config["path"])
+            all_results["rgb"] = rgb_results.get("rgb", {})
+            all_results.setdefault("per_file_metrics", {}).update(
+                rgb_results.get("per_file_metrics", {})
             )
-            print(f"  Results saved to: {output_path}")
-            print_results(results, f"RGB: {dataset_config['name']}")
+            print_results(
+                {k: v for k, v in rgb_results.items() if k != "per_file_metrics"},
+                f"RGB: {ds_name}",
+            )
+
+        # Save combined results
+        if all_results:
+            output_path = save_results(all_results, dataset_config)
+            print(f"\n  Results saved to: {output_path}")
 
     # Print sanity check report at the end
     if sanity_checker is not None:
         sanity_checker.print_report()
 
-        # Save sanity check report to file
         report = sanity_checker.get_full_report()
         report_path = Path("sanity_check_report.json")
         with open(report_path, "w") as f:

@@ -1,54 +1,40 @@
 {
-    "depth": {
-        "gt_dataset": {
-            "name": "depth_ground_truth",
-            "path": "/path/to/depth_gt_dataset",
-            "depth_scale": 0.001,
-            "intrinsics": {
-                "fx": 525.0,
-                "fy": 525.0,
-                "cx": 319.5,
-                "cy": 239.5
-            }
+    "gt": {
+        "rgb": {
+            "path": "/path/to/gt/rgb"
         },
-        "datasets": [
-            {
-                "name": "depth_model_a",
-                "path": "/path/to/depth_model_a",
-                "output_file": "/path/to/output/depth_model_a_metrics.json",
-                "depth_scale": 1.0
-            },
-            {
-                "name": "depth_model_b",
-                "path": "/path/to/depth_model_b",
-                "depth_scale": 0.001,
-                "intrinsics": {
-                    "fx": 525.0,
-                    "fy": 525.0,
-                    "cx": 319.5,
-                    "cy": 239.5
-                }
-            }
-        ]
+        "depth": {
+            "path": "/path/to/gt/depth"
+        },
+        "segmentation": {
+            "path": "/path/to/gt/segmentation"
+        },
+        "calibration": {
+            "path": "/path/to/gt/calibration"
+        }
     },
-    "rgb": {
-        "gt_dataset": {
-            "name": "rgb_ground_truth",
-            "path": "/path/to/rgb_gt_dataset",
-            "pixel_value_max": 255
-        },
-        "datasets": [
-            {
-                "name": "rgb_model_a",
-                "path": "/path/to/rgb_model_a",
-                "dim": [368, 1240],
-                "pixel_value_max": 255,
-                "output_file": "/path/to/output/rgb_model_a_metrics.json"
+    "datasets": [
+        {
+            "name": "model_a",
+            "rgb": {
+                "path": "/path/to/model_a/rgb"
             },
-            {
-                "name": "rgb_model_b",
-                "path": "/path/to/rgb_model_b"
+            "depth": {
+                "path": "/path/to/model_a/depth"
+            },
+            "output_file": "/path/to/output/model_a_eval.json"
+        },
+        {
+            "name": "model_b_depth_only",
+            "depth": {
+                "path": "/path/to/model_b/depth"
             }
-        ]
-    }
+        },
+        {
+            "name": "model_c_rgb_only",
+            "rgb": {
+                "path": "/path/to/model_c/rgb"
+            }
+        }
+    ]
 }

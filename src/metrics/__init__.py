@@ -65,8 +65,6 @@ from .high_freq_energy import (
 
 # Utilities
 from .utils import (
-    load_depth_file,
-    load_rgb_file,
     convert_planar_to_radial,
     normalize_depth_for_visualization,
     get_valid_mask,
@@ -126,8 +124,6 @@ __all__ = [
     "compute_frequency_spectrum_similarity",
     "aggregate_high_freq_metrics",
     # Utilities
-    "load_depth_file",
-    "load_rgb_file",
     "convert_planar_to_radial",
     "normalize_depth_for_visualization",
     "get_valid_mask",

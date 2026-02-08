@@ -1,13 +1,14 @@
 # depth-eval
 
-A comprehensive evaluation toolkit for comparing predicted depth maps and RGB images against ground truth, with built-in sanity checking.
+A comprehensive evaluation toolkit for comparing predicted depth maps and RGB images against ground truth, powered by [euler_loading](https://github.com/your-org/euler-loading) for flexible dataset loading.
 
 ## Features
 
 - **Depth metrics**: PSNR, SSIM, LPIPS, FID, KID, AbsRel, RMSE, Scale-Invariant Log Error, Normal Consistency, Depth Edge F1
 - **RGB metrics**: PSNR, SSIM, LPIPS, SCE (Structural Chromatic Error), Edge F1, Tail Errors (p95/p99), High-Frequency Energy Ratio, Depth-Binned Photometric Error
 - **Sanity checking**: Automatic validation of metric results against configurable thresholds, with detailed warning reports
-- **Hierarchical dataset matching**: Datasets are matched by ID through `output.json` manifests supporting nested hierarchy structures
+- **Sky masking**: Optional exclusion of sky regions from metrics using GT segmentation
+- **Flexible dataset loading**: Pluggable loader modules via euler_loading (e.g. vkitti2, real_drive_sim, or the generic fallback)
 - **Per-file and aggregate results**: Outputs both per-image metrics and dataset-level aggregates to JSON
 
 ## Installation
@@ -30,6 +31,7 @@ pip install -r requirements.txt
 - torch, torchvision
 - lpips
 - tqdm
+- euler-loading, ds-crawler
 
 ## Usage
 
@@ -41,78 +43,100 @@ python main.py <config.json> [options]
 
 | Flag | Description | Default |
 |---|---|---|
+| `--gt-loader` | Loader module for GT datasets | `euler_loading.loaders.gpu.generic_dense_depth` |
+| `--pred-loader` | Loader module for prediction datasets | same as `--gt-loader` |
 | `--device` | `cuda` or `cpu` | `cuda` |
 | `--batch-size` | Batch size for batched metrics | `16` |
 | `--num-workers` | Data loading workers | `4` |
 | `-v, --verbose` | Verbose output | off |
 | `--skip-depth` | Skip depth evaluation | off |
 | `--skip-rgb` | Skip RGB evaluation | off |
+| `--mask-sky` | Mask sky regions using GT segmentation | off |
 | `--no-sanity-check` | Disable sanity checking | off |
 | `--metrics-config` | Path to `metrics_config.json` | auto-detect |
 
-### Example
+### Examples
 
 ```bash
-python main.py example_config.json --device cuda --batch-size 32 -v
+# Evaluate using the generic loader (default)
+python main.py config.json --device cuda --batch-size 32
+
+# Evaluate a Virtual KITTI 2 dataset with dataset-specific loader
+python main.py config.json --gt-loader euler_loading.loaders.cpu.vkitti2
+
+# Evaluate with sky masking enabled (requires gt.segmentation in config)
+python main.py config.json --mask-sky -v
+
+# Use different loaders for GT and predictions
+python main.py config.json \
+  --gt-loader euler_loading.loaders.cpu.real_drive_sim \
+  --pred-loader euler_loading.loaders.gpu.generic_dense_depth
 ```
 
 ## Configuration
 
 ### `config.json`
 
-Defines which datasets to evaluate. See [example_config.json](example_config.json) for a full example.
+Defines GT modalities and prediction datasets to evaluate. See [example_config.json](example_config.json).
 
 ```json
 {
-  "depth": {
-    "gt_dataset": {
-      "name": "depth_ground_truth",
-      "path": "/path/to/depth_gt",
-      "depth_scale": 0.001,
-      "intrinsics": { "fx": 525.0, "fy": 525.0, "cx": 319.5, "cy": 239.5 }
-    },
-    "datasets": [
-      {
-        "name": "model_a",
-        "path": "/path/to/model_a_depth",
-        "depth_scale": 1.0,
-        "output_file": "/path/to/output.json"
-      }
-    ]
+  "gt": {
+    "rgb":          { "path": "/data/gt/rgb" },
+    "depth":        { "path": "/data/gt/depth" },
+    "segmentation": { "path": "/data/gt/segmentation" },
+    "calibration":  { "path": "/data/gt/calibration" }
   },
-  "rgb": {
-    "gt_dataset": {
-      "name": "rgb_ground_truth",
-      "path": "/path/to/rgb_gt",
-      "pixel_value_max": 255
+  "datasets": [
+    {
+      "name": "model_a",
+      "rgb":   { "path": "/data/model_a/rgb" },
+      "depth": { "path": "/data/model_a/depth" },
+      "output_file": "model_a_eval.json"
     },
-    "datasets": [
-      {
-        "name": "model_a",
-        "path": "/path/to/model_a_rgb",
-        "dim": [368, 1240],
-        "pixel_value_max": 255
-      }
-    ]
-  }
+    {
+      "name": "model_b",
+      "depth": { "path": "/data/model_b/depth" }
+    }
+  ]
 }
 ```
 
-#### Dataset fields
+#### GT section
 
 | Field | Required | Description |
 |---|---|---|
-| `name` | yes | Display name |
-| `path` | yes | Path to dataset root (must contain `output.json`) |
-| `depth_scale` | no | Multiplier to convert raw depth values to meters (default: `1.0`) |
-| `pixel_value_max` | no | Max pixel value for RGB normalization (default: `255`) |
-| `intrinsics` | no | Camera intrinsics (`fx`, `fy`, `cx`, `cy`) for planar-to-radial conversion |
-| `dim` | no | Target `[height, width]` for RGB GT resizing (RGB datasets only) |
-| `output_file` | no | Custom output path for results (prediction datasets only) |
+| `gt.rgb.path` | yes | Path to GT RGB dataset |
+| `gt.depth.path` | yes | Path to GT depth dataset |
+| `gt.segmentation.path` | no | Path to GT segmentation (needed for `--mask-sky`) |
+| `gt.calibration.path` | no | Path to calibration data (intrinsics matrices) |
+
+#### Prediction datasets
+
+Each entry in `datasets` can include `rgb`, `depth`, or both:
+
+| Field | Required | Description |
+|---|---|---|
+| `name` | yes | Display name for this prediction dataset |
+| `rgb.path` | no* | Path to predicted RGB dataset |
+| `depth.path` | no* | Path to predicted depth dataset |
+| `output_file` | no | Custom output path for results |
+
+\* At least one of `rgb.path` or `depth.path` is required.
+
+### Loader modules
+
+Loader modules are euler_loading dataset loaders that implement the `DenseDepthLoader` protocol (`rgb()`, `depth()`, `sky_mask()`, `read_intrinsics()`). Available loaders:
+
+- `euler_loading.loaders.gpu.generic_dense_depth` -- Generic loader (default), infers loading strategy from file extensions
+- `euler_loading.loaders.cpu.vkitti2` -- Virtual KITTI 2
+- `euler_loading.loaders.cpu.real_drive_sim` -- Real Drive Sim
+
+Dataset metadata (e.g. `scale_to_meters`, `radial_depth`, `rgb_range`) is read automatically from the dataset's `output.json` manifest via `get_modality_metadata()`.
 
 ### Dataset manifest (`output.json`)
 
-Each dataset directory must contain an `output.json` manifest describing its hierarchical file structure:
+Each dataset directory must contain an `output.json` manifest (generated by `ds-crawler`) describing its hierarchical file structure:
 
 ```json
 {
@@ -129,19 +153,15 @@ Each dataset directory must contain an `output.json` manifest describing its hie
 }
 ```
 
-Ground truth and prediction datasets are matched by hierarchy path and file ID.
+GT and prediction datasets are matched by hierarchy path and file ID through `MultiModalDataset`.
 
 ### `metrics_config.json`
 
-Controls sanity check thresholds. See [metrics_config.json](metrics_config.json) for all available options. Example thresholds:
-
-- Depth AbsRel median > 1.0 triggers a warning (error exceeds 100% of GT)
-- RGB PSNR outside 10-60 dB is flagged as unusual
-- High-frequency energy relative diff below -0.5 warns of over-smoothing
+Controls sanity check thresholds. See [metrics_config.json](metrics_config.json) for all available options.
 
 ## Output
 
-Results are saved as JSON (to the dataset path or a custom `output_file`) containing:
+Results are saved as JSON containing:
 
 - **Aggregate metrics** under `depth` / `rgb` keys
 - **Per-file metrics** under `per_file_metrics` with the same hierarchy structure as the input manifest

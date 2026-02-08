@@ -1,0 +1,32 @@
+{
+  "name": "VKITTI2",
+  "type": "rgb",
+  "meta": {
+    "rgb_range": [0, 1]
+  },
+  "dataset": {
+    "children": {
+      "Scene01": {
+        "children": {
+          "clone": {
+            "files": [
+              {"path": "Scene01/clone/rgb_00000.png", "id": "00000"},
+              {"path": "Scene01/clone/rgb_00001.png", "id": "00001"},
+              {"path": "Scene01/clone/rgb_00002.png", "id": "00002"}
+            ]
+          }
+        }
+      },
+      "Scene02": {
+        "children": {
+          "clone": {
+            "files": [
+              {"path": "Scene02/clone/rgb_00000.png", "id": "00000"},
+              {"path": "Scene02/clone/rgb_00001.png", "id": "00001"}
+            ]
+          }
+        }
+      }
+    }
+  }
+}

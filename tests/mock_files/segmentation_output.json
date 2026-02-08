@@ -1,0 +1,32 @@
+{
+  "name": "VKITTI2",
+  "type": "segmentation",
+  "meta": {
+    "sky_class_id": 29
+  },
+  "dataset": {
+    "children": {
+      "Scene01": {
+        "children": {
+          "clone": {
+            "files": [
+              {"path": "Scene01/clone/seg_00000.png", "id": "00000"},
+              {"path": "Scene01/clone/seg_00001.png", "id": "00001"},
+              {"path": "Scene01/clone/seg_00002.png", "id": "00002"}
+            ]
+          }
+        }
+      },
+      "Scene02": {
+        "children": {
+          "clone": {
+            "files": [
+              {"path": "Scene02/clone/seg_00000.png", "id": "00000"},
+              {"path": "Scene02/clone/seg_00001.png", "id": "00001"}
+            ]
+          }
+        }
+      }
+    }
+  }
+}
