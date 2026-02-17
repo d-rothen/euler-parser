@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Optional
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -57,7 +58,7 @@ def mock_dataset():
     Returns a factory function that takes index_outputs dict and returns
     a MagicMock with get_modality_metadata and modality_paths wired up.
     """
-    def _make(index_outputs: dict[str, dict], modality_names: list[str] | None = None):
+    def _make(index_outputs: dict[str, dict], modality_names: Optional[list[str]] = None):
         ds = MagicMock()
         ds._index_outputs = index_outputs
 

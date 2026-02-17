@@ -7,6 +7,7 @@ and tiny stub files, then runs through the full pipeline:
 
 import json
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pytest
@@ -80,7 +81,7 @@ def _make_files_list(prefix: str, ext: str, n: int) -> list[dict]:
 
 
 def _build_output_json(
-    name: str, dtype: str, files: list[dict], meta: dict | None = None
+    name: str, dtype: str, files: list[dict], meta: Optional[dict] = None
 ) -> dict:
     out: dict = {"name": name, "type": dtype}
     if meta:
@@ -92,7 +93,7 @@ def _build_output_json(
 
 
 def _build_hierarchical_output_json(
-    name: str, dtype: str, meta: dict | None = None
+    name: str, dtype: str, meta: Optional[dict] = None
 ) -> dict:
     """Calibration lives at the scene level, not file level."""
     out: dict = {"name": name, "type": dtype}
