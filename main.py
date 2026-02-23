@@ -20,6 +20,11 @@ from src.data import (
 from src.evaluate import evaluate_depth_samples, evaluate_rgb_samples
 from src.sanity_checker import SanityChecker
 
+try:
+    import euler_train as _euler_train
+except ImportError:
+    _euler_train = None
+
 
 def validate_gt_config(gt: dict) -> None:
     """Validate the ``gt`` section of the configuration.
@@ -61,6 +66,21 @@ def validate_dataset_entry(entry: dict, index: int) -> None:
                 raise ValueError(f"{label}.{modality}.path does not exist: {p}")
 
 
+def validate_euler_train_config(et_config: dict) -> None:
+    """Validate the optional ``euler_train`` config section.
+
+    Raises:
+        ValueError: If required fields are missing or euler_train is not installed.
+    """
+    if "dir" not in et_config:
+        raise ValueError("euler_train.dir is required when euler_train logging is enabled")
+    if _euler_train is None:
+        raise ValueError(
+            "euler_train logging is configured but the 'euler-train' package is not "
+            "installed. Install it with: pip install euler-train"
+        )
+
+
 def load_config(config_path: str) -> dict:
     """Load and validate configuration from JSON file.
 
@@ -84,6 +104,9 @@ def load_config(config_path: str) -> dict:
     validate_gt_config(config["gt"])
     for i, entry in enumerate(config["datasets"]):
         validate_dataset_entry(entry, i)
+
+    if "euler_train" in config:
+        validate_euler_train_config(config["euler_train"])
 
     return config
 
@@ -258,6 +281,19 @@ def main():
         print("Sanity checking disabled")
     print("-" * 60)
 
+    # Initialize euler_train logging if configured
+    et_config = config.get("euler_train")
+    et_run = None
+    if et_config is not None:
+        et_run = _euler_train.init(
+            dir=et_config["dir"],
+            run_id=et_config.get("run_id"),
+            run_name=et_config.get("run_name"),
+            config=config,
+        )
+        print(f"euler_train logging enabled -> {et_run.dir}")
+    print("-" * 60)
+
     gt = config["gt"]
     gt_depth_path = gt["depth"]["path"]
     gt_rgb_path = gt["rgb"]["path"]
@@ -271,8 +307,10 @@ def main():
         has_rgb = "rgb" in dataset_config and "path" in dataset_config["rgb"]
 
         all_results = {}
+        et_eval_datasets = {}
 
         # -- Depth evaluation --
+        depth_dataset = None
         if has_depth and not args.skip_depth:
             pred_depth_path = dataset_config["depth"]["path"]
             print(f"\n[DEPTH] Evaluating: '{ds_name}'")
@@ -287,6 +325,7 @@ def main():
                 calibration_path=calibration_path,
                 segmentation_path=segmentation_path,
             )
+            et_eval_datasets["depth"] = depth_dataset
 
             depth_meta = get_depth_metadata(depth_dataset)
             print(f"  scale_to_meters: {depth_meta['scale_to_meters']}")
@@ -320,6 +359,7 @@ def main():
             )
 
         # -- RGB evaluation --
+        rgb_dataset = None
         if has_rgb and not args.skip_rgb:
             pred_rgb_path = dataset_config["rgb"]["path"]
             print(f"\n[RGB] Evaluating: '{ds_name}'")
@@ -335,6 +375,7 @@ def main():
                 calibration_path=calibration_path,
                 segmentation_path=segmentation_path,
             )
+            et_eval_datasets["rgb"] = rgb_dataset
 
             rgb_meta = get_rgb_metadata(rgb_dataset)
             print(f"  rgb_range: {rgb_meta['rgb_range']}")
@@ -372,6 +413,16 @@ def main():
             output_path = save_results(all_results, dataset_config)
             print(f"\n  Results saved to: {output_path}")
 
+        # Log to euler_train
+        if et_run is not None and et_eval_datasets:
+            et_run.add_evaluation(
+                ds_name,
+                datasets=et_eval_datasets,
+                name=ds_name,
+                status="completed",
+                metadata={"results": {k: v for k, v in all_results.items() if k != "per_file_metrics"}},
+            )
+
     # Print sanity check report at the end
     if sanity_checker is not None:
         sanity_checker.print_report()
@@ -381,6 +432,10 @@ def main():
         with open(report_path, "w") as f:
             json.dump(report, f, indent=2)
         print(f"\nSanity check report saved to: {report_path}")
+
+    if et_run is not None:
+        et_run.finish()
+        print(f"\neuler_train run finished: {et_run.run_id}")
 
 
 if __name__ == "__main__":

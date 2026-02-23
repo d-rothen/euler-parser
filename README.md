@@ -1,4 +1,4 @@
-# depth-eval
+# euler-eval
 
 A comprehensive evaluation toolkit for comparing predicted depth maps and RGB images against ground truth, powered by [euler_loading](https://github.com/your-org/euler-loading) for flexible dataset loading.
 
@@ -13,7 +13,7 @@ A comprehensive evaluation toolkit for comparing predicted depth maps and RGB im
 
 ## Installation
 
-Requires Python 3.10+.
+Requires Python 3.9+.
 
 ```bash
 pip install -e .

@@ -1,4 +1,9 @@
 {
+    "euler_train": {
+        "dir": "runs/my_project",
+        "run_id": null,
+        "run_name": null
+    },
     "gt": {
         "rgb": {
             "path": "/path/to/gt/rgb"
