@@ -17,6 +17,7 @@ Requires Python 3.9+.
 
 ```bash
 pip install -e .
+uv pip install "euler-eval[logging] @ git+https://github.com/d-rothen/euler-parser.git"
 ```
 
 Or install dependencies directly:

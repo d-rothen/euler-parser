@@ -50,6 +50,11 @@ dev = [
 [project.scripts]
 depth-eval = "main:main"
 
+[tool.uv.sources]
+ds-crawler = { git = "https://github.com/d-rothen/ds-crawler" }
+euler-loading = { git = "https://github.com/d-rothen/euler-loading" }
+euler-train = { git = "https://github.com/d-rothen/euler-train" }
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]
