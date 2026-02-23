@@ -434,8 +434,12 @@ def main():
         print(f"\nSanity check report saved to: {report_path}")
 
     if et_run is not None:
-        et_run.finish()
-        print(f"\neuler_train run finished: {et_run.run_id}")
+        if et_config.get("run_id") is not None:
+            et_run.detach()
+            print(f"\neuler_train run detached (run still active): {et_run.run_id}")
+        else:
+            et_run.finish()
+            print(f"\neuler_train run finished: {et_run.run_id}")
 
 
 if __name__ == "__main__":
