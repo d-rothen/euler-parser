@@ -286,6 +286,10 @@ def main():
         all_results = {}
         et_eval_datasets = {}
 
+        # Register evaluation as running before work begins
+        if et_run is not None:
+            et_run.add_evaluation(ds_name, name=ds_name, status="running")
+
         # -- Depth evaluation --
         depth_dataset = None
         if has_depth and not args.skip_depth:
@@ -395,14 +399,15 @@ def main():
             et_run.add_evaluation(
                 ds_name,
                 datasets=et_eval_datasets,
-                name=ds_name,
-                status="completed",
+                # name=ds_name,
+                # status="completed",
                 metadata={
                     "results": {
                         k: v for k, v in all_results.items() if k != "per_file_metrics"
                     }
                 },
             )
+            et_run.finish_evaluation(ds_name)
 
     # Print sanity check report at the end
     if sanity_checker is not None:

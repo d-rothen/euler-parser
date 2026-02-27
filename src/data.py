@@ -5,12 +5,13 @@ and convert loaded tensors to the numpy formats expected by depth-eval
 metrics.
 """
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
 
-from euler_loading import Modality, MultiModalDataset
+from ds_crawler import index_dataset_from_path
+from euler_loading import Modality, MultiModalDataset, resolve_loader_module
 
 from .metrics.utils import convert_planar_to_radial
 
@@ -107,6 +108,37 @@ def process_depth(
 
 
 # ---------------------------------------------------------------------------
+# Loader resolution helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_sky_mask_loader(segmentation_path: str) -> Callable[..., Any]:
+    """Resolve the ``sky_mask`` loader for a segmentation dataset.
+
+    The segmentation dataset's ds-crawler index declares a loader module
+    (e.g. ``"vkitti2"``).  This function imports that module and returns
+    its ``sky_mask`` function so that raw class-segmentation data is
+    converted to a boolean sky mask at load time.
+    """
+    index = index_dataset_from_path(segmentation_path)
+    euler_meta = index.get("euler_loading", {})
+    loader_name = euler_meta.get("loader")
+    if loader_name is None:
+        raise ValueError(
+            f"Segmentation dataset at {segmentation_path!r} does not declare "
+            f"an 'euler_loading.loader' in its ds-crawler index."
+        )
+    module = resolve_loader_module(loader_name)
+    sky_fn = getattr(module, "sky_mask", None)
+    if sky_fn is None or not callable(sky_fn):
+        raise ValueError(
+            f"Loader module {loader_name!r} (resolved from {segmentation_path!r}) "
+            f"does not expose a 'sky_mask' function."
+        )
+    return sky_fn
+
+
+# ---------------------------------------------------------------------------
 # Dataset construction
 # ---------------------------------------------------------------------------
 
@@ -143,7 +175,10 @@ def build_depth_eval_dataset(
     if calibration_path is not None:
         hierarchical["calibration"] = Modality(path=calibration_path)
     if segmentation_path is not None:
-        hierarchical["segmentation"] = Modality(path=segmentation_path)
+        sky_fn = _resolve_sky_mask_loader(segmentation_path)
+        hierarchical["segmentation"] = Modality(
+            path=segmentation_path, loader=sky_fn
+        )
 
     return MultiModalDataset(
         modalities=modalities,
@@ -187,7 +222,10 @@ def build_rgb_eval_dataset(
     if calibration_path is not None:
         hierarchical["calibration"] = Modality(path=calibration_path)
     if segmentation_path is not None:
-        hierarchical["segmentation"] = Modality(path=segmentation_path)
+        sky_fn = _resolve_sky_mask_loader(segmentation_path)
+        hierarchical["segmentation"] = Modality(
+            path=segmentation_path, loader=sky_fn
+        )
 
     return MultiModalDataset(
         modalities=modalities,
