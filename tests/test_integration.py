@@ -41,7 +41,7 @@ K_MATRIX = np.array(
 
 
 # ---------------------------------------------------------------------------
-# Simple test loaders (match the DenseDepthLoader callable signature)
+# Simple test loaders (match the euler_loading loader callable signature)
 # ---------------------------------------------------------------------------
 
 

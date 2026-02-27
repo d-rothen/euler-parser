@@ -10,12 +10,10 @@ import sys
 from pathlib import Path
 
 from src.data import (
-    DEFAULT_LOADER,
     build_depth_eval_dataset,
     build_rgb_eval_dataset,
     get_depth_metadata,
     get_rgb_metadata,
-    load_loader_module,
 )
 from src.evaluate import evaluate_depth_samples, evaluate_rgb_samples
 from src.sanity_checker import SanityChecker
@@ -73,7 +71,9 @@ def validate_euler_train_config(et_config: dict) -> None:
         ValueError: If required fields are missing or euler_train is not installed.
     """
     if "dir" not in et_config:
-        raise ValueError("euler_train.dir is required when euler_train logging is enabled")
+        raise ValueError(
+            "euler_train.dir is required when euler_train logging is enabled"
+        )
     if _euler_train is None:
         raise ValueError(
             "euler_train logging is configured but the 'euler-train' package is not "
@@ -171,18 +171,6 @@ def main():
         help="Path to config.json file",
     )
     parser.add_argument(
-        "--gt-loader",
-        type=str,
-        default=None,
-        help=f"Loader module for GT datasets (default: {DEFAULT_LOADER})",
-    )
-    parser.add_argument(
-        "--pred-loader",
-        type=str,
-        default=None,
-        help="Loader module for prediction datasets (default: same as --gt-loader)",
-    )
-    parser.add_argument(
         "--device",
         type=str,
         default="cuda",
@@ -243,19 +231,7 @@ def main():
         print(f"Error loading config: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Load loader modules
-    gt_loader_path = args.gt_loader or DEFAULT_LOADER
-    pred_loader_path = args.pred_loader or gt_loader_path
-    try:
-        loader_gt = load_loader_module(gt_loader_path)
-        loader_pred = load_loader_module(pred_loader_path)
-    except (ImportError, TypeError) as e:
-        print(f"Error loading loader module: {e}", file=sys.stderr)
-        sys.exit(1)
-
     print(f"Device: {args.device}")
-    print(f"GT loader: {gt_loader_path}")
-    print(f"Pred loader: {pred_loader_path}")
     print("-" * 60)
 
     # Check sky masking prerequisites
@@ -289,7 +265,6 @@ def main():
             dir=et_config["dir"],
             run_id=et_config.get("run_id"),
             run_name=et_config.get("run_name"),
-            config=config,
         )
         print(f"euler_train logging enabled -> {et_run.dir}")
     print("-" * 60)
@@ -298,7 +273,9 @@ def main():
     gt_depth_path = gt["depth"]["path"]
     gt_rgb_path = gt["rgb"]["path"]
     calibration_path = gt.get("calibration", {}).get("path")
-    segmentation_path = gt.get("segmentation", {}).get("path") if args.mask_sky else None
+    segmentation_path = (
+        gt.get("segmentation", {}).get("path") if args.mask_sky else None
+    )
 
     # Evaluate each prediction dataset
     for dataset_config in config["datasets"]:
@@ -320,8 +297,6 @@ def main():
             depth_dataset = build_depth_eval_dataset(
                 gt_depth_path=gt_depth_path,
                 pred_depth_path=pred_depth_path,
-                loader_gt=loader_gt,
-                loader_pred=loader_pred,
                 calibration_path=calibration_path,
                 segmentation_path=segmentation_path,
             )
@@ -369,8 +344,6 @@ def main():
             rgb_dataset = build_rgb_eval_dataset(
                 gt_rgb_path=gt_rgb_path,
                 pred_rgb_path=pred_rgb_path,
-                loader_gt=loader_gt,
-                loader_pred=loader_pred,
                 gt_depth_path=gt_depth_path,
                 calibration_path=calibration_path,
                 segmentation_path=segmentation_path,
@@ -381,7 +354,11 @@ def main():
             print(f"  rgb_range: {rgb_meta['rgb_range']}")
             print(f"  Matched pairs: {len(rgb_dataset)}")
 
-            depth_meta = get_depth_metadata(rgb_dataset) if "gt_depth" in rgb_dataset.modality_paths() else None
+            depth_meta = (
+                get_depth_metadata(rgb_dataset)
+                if "gt_depth" in rgb_dataset.modality_paths()
+                else None
+            )
 
             rgb_results = evaluate_rgb_samples(
                 dataset=rgb_dataset,
@@ -420,7 +397,11 @@ def main():
                 datasets=et_eval_datasets,
                 name=ds_name,
                 status="completed",
-                metadata={"results": {k: v for k, v in all_results.items() if k != "per_file_metrics"}},
+                metadata={
+                    "results": {
+                        k: v for k, v in all_results.items() if k != "per_file_metrics"
+                    }
+                },
             )
 
     # Print sanity check report at the end

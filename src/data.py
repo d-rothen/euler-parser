@@ -1,46 +1,18 @@
 """Data loading bridge between euler_loading and depth-eval.
 
-Provides utilities to dynamically import loader modules, build
-MultiModalDataset instances from config, and convert loaded tensors
-to the numpy formats expected by depth-eval metrics.
+Provides utilities to build MultiModalDataset instances from config
+and convert loaded tensors to the numpy formats expected by depth-eval
+metrics.
 """
 
-import importlib
-import sys
 from typing import Any, Optional
 
 import numpy as np
 import torch
 
-from euler_loading import DenseDepthLoader, Modality, MultiModalDataset
+from euler_loading import Modality, MultiModalDataset
 
 from .metrics.utils import convert_planar_to_radial
-
-DEFAULT_LOADER = "euler_loading.loaders.gpu.generic_dense_depth"
-
-
-def load_loader_module(module_path: str) -> Any:
-    """Dynamically import a loader module and verify it satisfies DenseDepthLoader.
-
-    Args:
-        module_path: Dotted Python module path
-                     (e.g. ``euler_loading.loaders.cpu.vkitti2``).
-
-    Returns:
-        The imported module.
-
-    Raises:
-        ImportError: If the module cannot be imported.
-        TypeError: If the module does not satisfy the DenseDepthLoader protocol.
-    """
-    module = importlib.import_module(module_path)
-    if not isinstance(module, DenseDepthLoader):
-        raise TypeError(
-            f"Loader module '{module_path}' does not satisfy the "
-            f"DenseDepthLoader protocol. It must expose rgb(), depth(), "
-            f"sky_mask(), and read_intrinsics() callables."
-        )
-    return module
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +114,6 @@ def process_depth(
 def build_depth_eval_dataset(
     gt_depth_path: str,
     pred_depth_path: str,
-    loader_gt: Any,
-    loader_pred: Any,
     calibration_path: Optional[str] = None,
     segmentation_path: Optional[str] = None,
 ) -> MultiModalDataset:
@@ -152,11 +122,12 @@ def build_depth_eval_dataset(
     The returned dataset yields samples with keys ``"gt"``, ``"pred"``,
     and optionally ``"calibration"`` and ``"segmentation"``.
 
+    Loaders are resolved automatically from each dataset directory's
+    ds-crawler index metadata.
+
     Args:
         gt_depth_path: Path to GT depth dataset root.
         pred_depth_path: Path to prediction depth dataset root.
-        loader_gt: Loader module for GT data.
-        loader_pred: Loader module for prediction data.
         calibration_path: Optional path to calibration dataset.
         segmentation_path: Optional path to GT segmentation dataset.
 
@@ -164,19 +135,15 @@ def build_depth_eval_dataset(
         A MultiModalDataset instance.
     """
     modalities = {
-        "gt": Modality(path=gt_depth_path, loader=loader_gt.depth),
-        "pred": Modality(path=pred_depth_path, loader=loader_pred.depth),
+        "gt": Modality(path=gt_depth_path),
+        "pred": Modality(path=pred_depth_path),
     }
 
     hierarchical = {}
     if calibration_path is not None:
-        hierarchical["calibration"] = Modality(
-            path=calibration_path, loader=loader_gt.read_intrinsics
-        )
+        hierarchical["calibration"] = Modality(path=calibration_path)
     if segmentation_path is not None:
-        hierarchical["segmentation"] = Modality(
-            path=segmentation_path, loader=loader_gt.sky_mask
-        )
+        hierarchical["segmentation"] = Modality(path=segmentation_path)
 
     return MultiModalDataset(
         modalities=modalities,
@@ -187,8 +154,6 @@ def build_depth_eval_dataset(
 def build_rgb_eval_dataset(
     gt_rgb_path: str,
     pred_rgb_path: str,
-    loader_gt: Any,
-    loader_pred: Any,
     gt_depth_path: Optional[str] = None,
     calibration_path: Optional[str] = None,
     segmentation_path: Optional[str] = None,
@@ -198,11 +163,12 @@ def build_rgb_eval_dataset(
     The returned dataset yields samples with keys ``"gt"``, ``"pred"``,
     and optionally ``"gt_depth"``, ``"calibration"``, ``"segmentation"``.
 
+    Loaders are resolved automatically from each dataset directory's
+    ds-crawler index metadata.
+
     Args:
         gt_rgb_path: Path to GT RGB dataset root.
         pred_rgb_path: Path to prediction RGB dataset root.
-        loader_gt: Loader module for GT data.
-        loader_pred: Loader module for prediction data.
         gt_depth_path: Optional GT depth path for depth-binned metrics.
         calibration_path: Optional calibration dataset path.
         segmentation_path: Optional GT segmentation dataset path.
@@ -211,23 +177,17 @@ def build_rgb_eval_dataset(
         A MultiModalDataset instance.
     """
     modalities: dict[str, Modality] = {
-        "gt": Modality(path=gt_rgb_path, loader=loader_gt.rgb),
-        "pred": Modality(path=pred_rgb_path, loader=loader_pred.rgb),
+        "gt": Modality(path=gt_rgb_path),
+        "pred": Modality(path=pred_rgb_path),
     }
     if gt_depth_path is not None:
-        modalities["gt_depth"] = Modality(
-            path=gt_depth_path, loader=loader_gt.depth
-        )
+        modalities["gt_depth"] = Modality(path=gt_depth_path)
 
     hierarchical = {}
     if calibration_path is not None:
-        hierarchical["calibration"] = Modality(
-            path=calibration_path, loader=loader_gt.read_intrinsics
-        )
+        hierarchical["calibration"] = Modality(path=calibration_path)
     if segmentation_path is not None:
-        hierarchical["segmentation"] = Modality(
-            path=segmentation_path, loader=loader_gt.sky_mask
-        )
+        hierarchical["segmentation"] = Modality(path=segmentation_path)
 
     return MultiModalDataset(
         modalities=modalities,

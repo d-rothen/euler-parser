@@ -1,16 +1,14 @@
 """Root conftest: patches missing dependencies for the test environment.
 
-The system Python may lack optional/heavy packages (lpips, torchvision,
-euler_loading.DenseDepthLoader). This conftest stubs them so the test
-suite can import src.* modules without error.
+The system Python may lack optional/heavy packages (lpips, torchvision).
+This conftest stubs them so the test suite can import src.* modules
+without error.
 """
 
 import builtins
 import sys
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any
 from unittest.mock import MagicMock
-
-import torch
 
 
 # ---------------------------------------------------------------------------
@@ -57,36 +55,6 @@ def _install_import_hook() -> None:
 # Heavy optional dependencies that may not be installed in the test env
 _stub_missing_package("lpips", "torchvision")
 _install_import_hook()
-
-
-# ---------------------------------------------------------------------------
-# Ensure euler_loading.DenseDepthLoader is available
-# ---------------------------------------------------------------------------
-
-def _ensure_dense_depth_loader() -> None:
-    """Add DenseDepthLoader to euler_loading if the installed version lacks it."""
-    import euler_loading
-
-    if hasattr(euler_loading, "DenseDepthLoader"):
-        return
-
-    @runtime_checkable
-    class DenseDepthLoader(Protocol):
-        def rgb(self, path: str, meta: Optional[dict[str, Any]] = None) -> torch.Tensor: ...
-        def depth(self, path: str, meta: Optional[dict[str, Any]] = None) -> torch.Tensor: ...
-        def sky_mask(self, path: str, meta: Optional[dict[str, Any]] = None) -> torch.Tensor: ...
-        def read_intrinsics(self, path: str, meta: Optional[dict[str, Any]] = None) -> torch.Tensor: ...
-
-    euler_loading.DenseDepthLoader = DenseDepthLoader
-
-    contracts_name = "euler_loading.loaders.contracts"
-    if contracts_name not in sys.modules:
-        contracts_mod = MagicMock()
-        contracts_mod.DenseDepthLoader = DenseDepthLoader
-        sys.modules[contracts_name] = contracts_mod
-
-
-_ensure_dense_depth_loader()
 
 
 # ---------------------------------------------------------------------------
