@@ -1,9 +1,25 @@
 """Learned Perceptual Image Patch Similarity (LPIPS) metric for depth maps."""
 
+from typing import Union
+
+import lpips
 import numpy as np
 import torch
-from typing import Optional, Union
-import lpips
+
+
+def _resolve_device(device: Union[str, torch.device]) -> torch.device:
+    """Resolve a metric runtime device with CUDA fallback."""
+    if isinstance(device, torch.device):
+        requested = device
+    else:
+        name = str(device)
+        if name == "auto":
+            name = "cuda" if torch.cuda.is_available() else "cpu"
+        requested = torch.device(name)
+
+    if requested.type == "cuda" and not torch.cuda.is_available():
+        return torch.device("cpu")
+    return requested
 
 
 class LPIPSMetric:
@@ -23,7 +39,8 @@ class LPIPSMetric:
             net: Network to use ('alex', 'vgg', 'squeeze').
             device: Device to run computation on.
         """
-        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        self.device = _resolve_device(device)
+        self._non_blocking = self.device.type == "cuda"
         self.model = lpips.LPIPS(net=net).to(self.device)
         self.model.eval()
 
@@ -58,7 +75,7 @@ class LPIPSMetric:
         tensor = tensor.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
         tensor = tensor.expand(-1, 3, -1, -1)  # (1, 3, H, W)
 
-        return tensor.to(self.device)
+        return tensor.to(self.device, non_blocking=self._non_blocking)
 
     def compute(
         self,
@@ -74,7 +91,7 @@ class LPIPSMetric:
         Returns:
             LPIPS value. Lower is better (more similar).
         """
-        with torch.no_grad():
+        with torch.inference_mode():
             pred_tensor = self._prepare_input(depth_pred)
             gt_tensor = self._prepare_input(depth_gt)
 
@@ -104,14 +121,17 @@ class LPIPSMetric:
             batch_pred = depths_pred[i : i + batch_size]
             batch_gt = depths_gt[i : i + batch_size]
 
-            with torch.no_grad():
+            with torch.inference_mode():
                 pred_tensors = torch.cat(
                     [self._prepare_input(d) for d in batch_pred], dim=0
                 )
-                gt_tensors = torch.cat([self._prepare_input(d) for d in batch_gt], dim=0)
+                gt_tensors = torch.cat(
+                    [self._prepare_input(d) for d in batch_gt], dim=0
+                )
 
                 lpips_values = self.model(pred_tensors, gt_tensors)
-                results.extend([float(v) for v in lpips_values.squeeze()])
+                values = lpips_values.reshape(-1).detach().float().cpu().numpy()
+                results.extend(values.tolist())
 
         return results
 

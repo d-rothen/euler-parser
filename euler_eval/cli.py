@@ -9,6 +9,8 @@ import json
 import sys
 from pathlib import Path
 
+import torch
+
 from .data import (
     build_depth_eval_dataset,
     build_rgb_eval_dataset,
@@ -22,6 +24,49 @@ try:
     import euler_train as _euler_train
 except ImportError:
     _euler_train = None
+
+
+def resolve_device(device: str) -> str:
+    """Resolve runtime device with graceful CUDA fallback."""
+    if device == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda" and not torch.cuda.is_available():
+        print(
+            "Warning: --device cuda requested but CUDA is unavailable. "
+            "Falling back to CPU.",
+            file=sys.stderr,
+        )
+        return "cpu"
+    return device
+
+
+def configure_torch_runtime(device: str) -> None:
+    """Enable CUDA performance knobs when running on GPU."""
+    if device != "cuda":
+        return
+
+    torch.backends.cudnn.benchmark = True
+    if hasattr(torch.backends.cudnn, "allow_tf32"):
+        torch.backends.cudnn.allow_tf32 = True
+    if hasattr(torch.backends.cuda, "matmul"):
+        torch.backends.cuda.matmul.allow_tf32 = True
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision("high")
+
+
+def print_device_info(requested_device: str, resolved_device: str) -> None:
+    """Print effective runtime device info."""
+    if requested_device == resolved_device:
+        print(f"Device: {resolved_device}")
+    else:
+        print(f"Device: {requested_device} -> {resolved_device}")
+
+    if resolved_device == "cuda":
+        try:
+            idx = torch.cuda.current_device()
+            print(f"GPU: {torch.cuda.get_device_name(idx)}")
+        except Exception:
+            pass
 
 
 def validate_gt_config(gt: dict) -> None:
@@ -173,9 +218,9 @@ def main():
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda",
-        choices=["cuda", "cpu"],
-        help="Device to use for computation (default: cuda)",
+        default="auto",
+        choices=["auto", "cuda", "cpu"],
+        help="Device to use for computation (default: auto)",
     )
     parser.add_argument(
         "--batch-size",
@@ -226,7 +271,7 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Auto-detect and align normalized depth predictions via "
-             "least-squares scale-and-shift (use --no-sns to disable)",
+        "least-squares scale-and-shift (use --no-sns to disable)",
     )
 
     args = parser.parse_args()
@@ -238,7 +283,10 @@ def main():
         print(f"Error loading config: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"Device: {args.device}")
+    requested_device = args.device
+    args.device = resolve_device(requested_device)
+    configure_torch_runtime(args.device)
+    print_device_info(requested_device, args.device)
     print("-" * 60)
 
     # Check sky masking prerequisites

@@ -65,7 +65,7 @@ python main.py <config> [options]
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--device` | `{cuda,cpu}` | `cuda` | Device to use for computation |
+| `--device` | `{auto,cuda,cpu}` | `auto` | Compute device (`auto` prefers CUDA when available) |
 | `--batch-size` | `int` | `16` | Batch size for metrics that support batching |
 | `--num-workers` | `int` | `4` | Number of data loading workers |
 | `--verbose`, `-v` | flag | off | Enable verbose output |
@@ -74,12 +74,13 @@ python main.py <config> [options]
 | `--mask-sky` | flag | off | Mask sky regions from metrics using GT segmentation |
 | `--no-sanity-check` | flag | off | Disable sanity checking of metric configurations |
 | `--metrics-config` | `str` | auto-detect | Path to `metrics_config.json` for sanity checking |
+| `--sns`, `--no-sns` | flag | `--sns` | Enable/disable automatic depth scale-and-shift alignment |
 
 ### Examples
 
 ```bash
-# Evaluate with default settings
-depth-eval config.json --device cuda --batch-size 32
+# Evaluate with default settings (auto-selects CUDA when available)
+depth-eval config.json --batch-size 32
 
 # Evaluate with sky masking enabled (requires gt.segmentation in config)
 depth-eval config.json --mask-sky -v
@@ -89,6 +90,9 @@ depth-eval config.json --skip-rgb
 
 # Disable sanity checking
 depth-eval config.json --no-sanity-check
+
+# Disable depth scale-and-shift alignment
+depth-eval config.json --no-sns
 ```
 
 ## Configuration

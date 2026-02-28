@@ -1,9 +1,25 @@
 """LPIPS metric for RGB images."""
 
+from typing import Union
+
+import lpips
 import numpy as np
 import torch
-from typing import Union
-import lpips
+
+
+def _resolve_device(device: Union[str, torch.device]) -> torch.device:
+    """Resolve a metric runtime device with CUDA fallback."""
+    if isinstance(device, torch.device):
+        requested = device
+    else:
+        name = str(device)
+        if name == "auto":
+            name = "cuda" if torch.cuda.is_available() else "cpu"
+        requested = torch.device(name)
+
+    if requested.type == "cuda" and not torch.cuda.is_available():
+        return torch.device("cpu")
+    return requested
 
 
 class RGBLPIPSMetric:
@@ -20,7 +36,8 @@ class RGBLPIPSMetric:
             net: Network to use ('alex', 'vgg', 'squeeze').
             device: Device to run computation on.
         """
-        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        self.device = _resolve_device(device)
+        self._non_blocking = self.device.type == "cuda"
         self.model = lpips.LPIPS(net=net).to(self.device)
         self.model.eval()
 
@@ -40,7 +57,7 @@ class RGBLPIPSMetric:
         tensor = torch.from_numpy(normalized).float()
         tensor = tensor.permute(2, 0, 1).unsqueeze(0)
 
-        return tensor.to(self.device)
+        return tensor.to(self.device, non_blocking=self._non_blocking)
 
     def compute(
         self,
@@ -56,7 +73,7 @@ class RGBLPIPSMetric:
         Returns:
             LPIPS value. Lower is better (more similar).
         """
-        with torch.no_grad():
+        with torch.inference_mode():
             pred_tensor = self._prepare_input(img_pred)
             gt_tensor = self._prepare_input(img_gt)
 
@@ -86,7 +103,7 @@ class RGBLPIPSMetric:
             batch_pred = imgs_pred[i : i + batch_size]
             batch_gt = imgs_gt[i : i + batch_size]
 
-            with torch.no_grad():
+            with torch.inference_mode():
                 pred_tensors = torch.cat(
                     [self._prepare_input(img) for img in batch_pred], dim=0
                 )
@@ -95,7 +112,8 @@ class RGBLPIPSMetric:
                 )
 
                 lpips_values = self.model(pred_tensors, gt_tensors)
-                results.extend([float(v) for v in lpips_values.squeeze()])
+                values = lpips_values.reshape(-1).detach().float().cpu().numpy()
+                results.extend(values.tolist())
 
         return results
 

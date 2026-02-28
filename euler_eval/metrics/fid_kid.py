@@ -1,14 +1,30 @@
 """Fréchet Inception Distance (FID) and Kernel Inception Distance (KID) metrics."""
 
+from typing import Optional, Union
+
 import numpy as np
 import torch
 import torch.nn as nn
+from scipy import linalg
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
-from torchvision.models import inception_v3, Inception_V3_Weights
-from typing import Optional, Union
-from scipy import linalg
+from torchvision.models import Inception_V3_Weights, inception_v3
 from tqdm import tqdm
+
+
+def _resolve_device(device: Union[str, torch.device]) -> torch.device:
+    """Resolve a metric runtime device with CUDA fallback."""
+    if isinstance(device, torch.device):
+        requested = device
+    else:
+        name = str(device)
+        if name == "auto":
+            name = "cuda" if torch.cuda.is_available() else "cpu"
+        requested = torch.device(name)
+
+    if requested.type == "cuda" and not torch.cuda.is_available():
+        return torch.device("cpu")
+    return requested
 
 
 class DepthDataset(Dataset):
@@ -63,7 +79,8 @@ class FIDKIDMetric:
         Args:
             device: Device to run computation on.
         """
-        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        self.device = _resolve_device(device)
+        self._non_blocking = self.device.type == "cuda"
 
         # Load Inception v3 and modify for feature extraction
         self.model = inception_v3(weights=Inception_V3_Weights.DEFAULT)
@@ -81,6 +98,35 @@ class FIDKIDMetric:
                 ),
             ]
         )
+        self._cached_pair_key: tuple[int, int, int, int, int, int] | None = None
+        self._cached_pair_features: tuple[np.ndarray, np.ndarray] | None = None
+
+    def _build_dataloader(
+        self,
+        dataset: Dataset,
+        batch_size: int,
+        num_workers: int,
+    ) -> DataLoader:
+        """Create a DataLoader tuned for the active device."""
+        kwargs: dict[str, object] = {
+            "batch_size": batch_size,
+            "shuffle": False,
+            "num_workers": num_workers,
+            "pin_memory": self.device.type == "cuda",
+        }
+
+        if num_workers > 0:
+            kwargs["persistent_workers"] = True
+            kwargs["prefetch_factor"] = 4
+
+        if self.device.type == "cuda":
+            kwargs["pin_memory_device"] = "cuda"
+
+        try:
+            return DataLoader(dataset, **kwargs)
+        except TypeError:
+            kwargs.pop("pin_memory_device", None)
+            return DataLoader(dataset, **kwargs)
 
     def _extract_features(
         self,
@@ -99,46 +145,49 @@ class FIDKIDMetric:
             Feature array of shape (N, 2048).
         """
         dataset = DepthDataset(depth_maps, transform=self.transform)
-        dataloader = DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=True,
-        )
+        dataloader = self._build_dataloader(dataset, batch_size, num_workers)
 
         features = []
 
-        with torch.no_grad():
+        with torch.inference_mode():
             for batch in tqdm(dataloader, desc="Extracting features", leave=False):
-                batch = batch.to(self.device)
+                batch = batch.to(self.device, non_blocking=self._non_blocking)
                 feat = self.model(batch)
                 features.append(feat.cpu().numpy())
 
         return np.concatenate(features, axis=0)
 
-    def compute_fid(
+    def _get_feature_pair(
         self,
         depths1: list[np.ndarray],
         depths2: list[np.ndarray],
-        batch_size: int = 16,
-        num_workers: int = 4,
-    ) -> float:
-        """Compute FID between two sets of depth maps.
+        batch_size: int,
+        num_workers: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Get feature matrices for a pair of datasets with simple memoization."""
+        key = (
+            id(depths1),
+            len(depths1),
+            id(depths2),
+            len(depths2),
+            batch_size,
+            num_workers,
+        )
+        if self._cached_pair_key == key and self._cached_pair_features is not None:
+            return self._cached_pair_features
 
-        Args:
-            depths1: First set of depth maps.
-            depths2: Second set of depth maps.
-            batch_size: Batch size for feature extraction.
-            num_workers: Number of data loading workers.
-
-        Returns:
-            FID score. Lower is better.
-        """
-        # Extract features
         features1 = self._extract_features(depths1, batch_size, num_workers)
         features2 = self._extract_features(depths2, batch_size, num_workers)
+        self._cached_pair_key = key
+        self._cached_pair_features = (features1, features2)
+        return features1, features2
 
+    def _compute_fid_from_features(
+        self,
+        features1: np.ndarray,
+        features2: np.ndarray,
+    ) -> float:
+        """Compute FID from pre-extracted feature matrices."""
         # Compute statistics
         mu1, sigma1 = np.mean(features1, axis=0), np.cov(features1, rowvar=False)
         mu2, sigma2 = np.mean(features2, axis=0), np.cov(features2, rowvar=False)
@@ -162,32 +211,14 @@ class FIDKIDMetric:
 
         return float(fid)
 
-    def compute_kid(
+    def _compute_kid_from_features(
         self,
-        depths1: list[np.ndarray],
-        depths2: list[np.ndarray],
-        batch_size: int = 16,
-        num_workers: int = 4,
+        features1: np.ndarray,
+        features2: np.ndarray,
         num_subsets: int = 100,
         subset_size: int = 1000,
     ) -> tuple[float, float]:
-        """Compute KID between two sets of depth maps.
-
-        Args:
-            depths1: First set of depth maps.
-            depths2: Second set of depth maps.
-            batch_size: Batch size for feature extraction.
-            num_workers: Number of data loading workers.
-            num_subsets: Number of subsets for KID computation.
-            subset_size: Size of each subset.
-
-        Returns:
-            Tuple of (KID mean, KID std). Lower is better.
-        """
-        # Extract features
-        features1 = self._extract_features(depths1, batch_size, num_workers)
-        features2 = self._extract_features(depths2, batch_size, num_workers)
-
+        """Compute KID from pre-extracted feature matrices."""
         # Adjust subset size if needed
         n1, n2 = len(features1), len(features2)
         subset_size = min(subset_size, n1, n2)
@@ -220,6 +251,61 @@ class FIDKIDMetric:
             kid_values.append(mmd2)
 
         return float(np.mean(kid_values)), float(np.std(kid_values))
+
+    def compute_fid(
+        self,
+        depths1: list[np.ndarray],
+        depths2: list[np.ndarray],
+        batch_size: int = 16,
+        num_workers: int = 4,
+    ) -> float:
+        """Compute FID between two sets of depth maps."""
+        features1, features2 = self._get_feature_pair(
+            depths1, depths2, batch_size, num_workers
+        )
+        return self._compute_fid_from_features(features1, features2)
+
+    def compute_kid(
+        self,
+        depths1: list[np.ndarray],
+        depths2: list[np.ndarray],
+        batch_size: int = 16,
+        num_workers: int = 4,
+        num_subsets: int = 100,
+        subset_size: int = 1000,
+    ) -> tuple[float, float]:
+        """Compute KID between two sets of depth maps."""
+        features1, features2 = self._get_feature_pair(
+            depths1, depths2, batch_size, num_workers
+        )
+        return self._compute_kid_from_features(
+            features1,
+            features2,
+            num_subsets=num_subsets,
+            subset_size=subset_size,
+        )
+
+    def compute_fid_kid(
+        self,
+        depths1: list[np.ndarray],
+        depths2: list[np.ndarray],
+        batch_size: int = 16,
+        num_workers: int = 4,
+        num_subsets: int = 100,
+        subset_size: int = 1000,
+    ) -> tuple[float, float, float]:
+        """Compute FID and KID in one pass of feature extraction."""
+        features1, features2 = self._get_feature_pair(
+            depths1, depths2, batch_size, num_workers
+        )
+        fid = self._compute_fid_from_features(features1, features2)
+        kid_mean, kid_std = self._compute_kid_from_features(
+            features1,
+            features2,
+            num_subsets=num_subsets,
+            subset_size=subset_size,
+        )
+        return fid, kid_mean, kid_std
 
 
 def compute_fid(
