@@ -10,6 +10,7 @@ from tqdm import tqdm
 from euler_loading import MultiModalDataset
 
 from .data import (
+    align_to_prediction,
     process_depth,
     to_numpy_depth,
     to_numpy_intrinsics,
@@ -210,6 +211,7 @@ def evaluate_depth_samples(
     normal_metadata_list = []
 
     logged_stats = False
+    logged_alignment = False
 
     print("Computing per-image depth metrics...")
     for i in tqdm(range(num_samples), desc="Processing depth pairs"):
@@ -218,6 +220,16 @@ def evaluate_depth_samples(
 
         depth_gt = to_numpy_depth(sample["gt"])
         depth_pred = to_numpy_depth(sample["pred"])
+
+        # Align GT to prediction dimensions (e.g. VAE multiple-of-8 crop)
+        if depth_gt.shape[:2] != depth_pred.shape[:2]:
+            if not logged_alignment:
+                print(
+                    f"  Aligning GT {depth_gt.shape[:2]} -> "
+                    f"pred {depth_pred.shape[:2]}"
+                )
+                logged_alignment = True
+            depth_gt = align_to_prediction(depth_gt, depth_pred)
 
         intrinsics_K = _get_intrinsics_K(sample)
 
@@ -234,6 +246,8 @@ def evaluate_depth_samples(
         if sky_mask_enabled:
             sky_valid = _get_sky_mask(sample)
             if sky_valid is not None:
+                if sky_valid.shape[:2] != depth_pred.shape[:2]:
+                    sky_valid = align_to_prediction(sky_valid, depth_pred)
                 valid_mask = (
                     (depth_gt > 0) & (depth_pred > 0)
                     & np.isfinite(depth_gt) & np.isfinite(depth_pred)
@@ -503,6 +517,7 @@ def evaluate_rgb_samples(
     depth_binned_per_entry = []
 
     logged_stats = False
+    logged_alignment = False
 
     print("Computing per-image RGB metrics...")
     for i in tqdm(range(num_samples), desc="Processing RGB pairs"):
@@ -512,13 +527,15 @@ def evaluate_rgb_samples(
         img_gt = to_numpy_rgb(sample["gt"])
         img_pred = to_numpy_rgb(sample["pred"])
 
-        if img_gt.shape != img_pred.shape:
-            if verbose:
+        # Align GT to prediction dimensions (e.g. VAE multiple-of-8 crop)
+        if img_gt.shape[:2] != img_pred.shape[:2]:
+            if not logged_alignment:
                 print(
-                    f"Warning: Size mismatch for {entry_id}: "
-                    f"gt {img_gt.shape} vs pred {img_pred.shape}. Skipping."
+                    f"  Aligning GT {img_gt.shape[:2]} -> "
+                    f"pred {img_pred.shape[:2]}"
                 )
-            continue
+                logged_alignment = True
+            img_gt = align_to_prediction(img_gt, img_pred)
 
         if not logged_stats:
             _log_sample_stats(img_gt, img_pred, "RGB")
@@ -530,6 +547,8 @@ def evaluate_rgb_samples(
         sky_valid = None
         if sky_mask_enabled:
             sky_valid = _get_sky_mask(sample)
+            if sky_valid is not None and sky_valid.shape[:2] != img_pred.shape[:2]:
+                sky_valid = align_to_prediction(sky_valid, img_pred)
 
         if sanity_checker is not None:
             sanity_checker.validate_rgb_input(img_gt, img_pred, entry_id)
@@ -593,17 +612,12 @@ def evaluate_rgb_samples(
                     depth_meta["radial_depth"],
                     intrinsics_K,
                 )
-                if gt_depth.shape[:2] != img_gt.shape[:2]:
-                    if verbose:
-                        print(
-                            f"Warning: Depth shape {gt_depth.shape} != RGB shape "
-                            f"{img_gt.shape[:2]} for {entry_id}. Skipping depth-binned."
-                        )
-                else:
-                    depth_binned_entry = compute_depth_binned_photometric_error(
-                        pred_masked, gt_masked, gt_depth
-                    )
-                    depth_binned_results.append(depth_binned_entry)
+                if gt_depth.shape[:2] != img_pred.shape[:2]:
+                    gt_depth = align_to_prediction(gt_depth, img_pred)
+                depth_binned_entry = compute_depth_binned_photometric_error(
+                    pred_masked, gt_masked, gt_depth
+                )
+                depth_binned_results.append(depth_binned_entry)
             except Exception as e:
                 _warn_metric_failure("depth_binned_photometric", entry_id, e)
 

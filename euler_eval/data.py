@@ -108,6 +108,53 @@ def process_depth(
 
 
 # ---------------------------------------------------------------------------
+# Dimension alignment
+# ---------------------------------------------------------------------------
+
+
+def align_to_prediction(gt: np.ndarray, pred: np.ndarray) -> np.ndarray:
+    """Align GT array dimensions to match prediction.
+
+    Detects the common VAE multiple-of-8 crop pattern (prediction dims are
+    multiples of 8 and differ from GT by fewer than 8 pixels per axis) and
+    applies the same top-left crop to the GT array.  Falls back to resizing
+    for any other mismatch.
+
+    Works for ``(H, W)`` depth/mask and ``(H, W, 3)`` RGB arrays.
+
+    Args:
+        gt: Ground-truth array.
+        pred: Prediction array whose spatial dimensions are the target.
+
+    Returns:
+        GT array with spatial dimensions matching *pred*.
+    """
+    gt_h, gt_w = gt.shape[:2]
+    pred_h, pred_w = pred.shape[:2]
+
+    if gt_h == pred_h and gt_w == pred_w:
+        return gt
+
+    dh = gt_h - pred_h
+    dw = gt_w - pred_w
+
+    # Detect VAE multiple-of-8 crop: pred dims are multiples of 8 and
+    # the GT is at most 7 pixels larger on each axis.
+    if (pred_h % 8 == 0 and pred_w % 8 == 0
+            and 0 <= dh < 8 and 0 <= dw < 8):
+        return gt[:pred_h, :pred_w]
+
+    # Fallback: resize GT to match prediction dimensions.
+    import cv2
+
+    is_bool = gt.dtype == bool
+    src = gt.astype(np.uint8) if is_bool else gt
+    interp = cv2.INTER_NEAREST if src.ndim == 2 else cv2.INTER_LINEAR
+    result = cv2.resize(src, (pred_w, pred_h), interpolation=interp)
+    return result.astype(bool) if is_bool else result
+
+
+# ---------------------------------------------------------------------------
 # Loader resolution helpers
 # ---------------------------------------------------------------------------
 
