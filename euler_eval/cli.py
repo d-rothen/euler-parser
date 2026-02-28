@@ -7,6 +7,7 @@ Parses config.json and runs evaluation using euler_loading datasets.
 import argparse
 import json
 import sys
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -177,8 +178,52 @@ def load_config(config_path: str) -> dict:
     return config
 
 
+def _find_zip_ancestor(path: Path):
+    """Find a ``.zip`` file among the ancestors of *path*.
+
+    Returns:
+        ``(zip_path, internal_name)`` when a zip archive is detected in the
+        path hierarchy, or ``(None, None)`` for plain filesystem paths.
+    """
+    parts = path.parts
+    for i in range(1, len(parts) + 1):
+        candidate = Path(*parts[:i])
+        if candidate.suffix.lower() == ".zip" and candidate.is_file():
+            remainder = "/".join(parts[i:])
+            return candidate, remainder
+    return None, None
+
+
+def _save_json_to_zip(zip_path: Path, internal_name: str, data: dict) -> None:
+    """Write JSON *data* into an existing zip archive at *internal_name*.
+
+    If an entry with the same name already exists it is replaced.
+    """
+    json_bytes = json.dumps(data, indent=2).encode("utf-8")
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        needs_replace = internal_name in zf.namelist()
+
+    if needs_replace:
+        tmp = zip_path.with_suffix(".zip.tmp")
+        with zipfile.ZipFile(zip_path, "r") as zf_in:
+            with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf_out:
+                for item in zf_in.infolist():
+                    if item.filename != internal_name:
+                        zf_out.writestr(item, zf_in.read(item.filename))
+                zf_out.writestr(internal_name, json_bytes)
+        tmp.replace(zip_path)
+    else:
+        with zipfile.ZipFile(zip_path, "a") as zf:
+            zf.writestr(internal_name, json_bytes)
+
+
 def save_results(results: dict, dataset_config: dict) -> Path:
     """Save results to output file.
+
+    Handles both plain directories and zip archives.  When the resolved
+    output path passes through a ``.zip`` file the results are written
+    into the archive instead of onto the filesystem.
 
     Args:
         results: Results dictionary.
@@ -199,10 +244,13 @@ def save_results(results: dict, dataset_config: dict) -> Path:
     else:
         output_file = Path(output_file)
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(output_file, "w") as f:
-        json.dump(results, f, indent=2)
+    zip_path, internal_name = _find_zip_ancestor(output_file)
+    if zip_path is not None and internal_name:
+        _save_json_to_zip(zip_path, internal_name, results)
+    else:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_file, "w") as f:
+            json.dump(results, f, indent=2)
 
     return output_file
 
