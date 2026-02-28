@@ -45,6 +45,12 @@ class TestToNumpyDepth:
         result = to_numpy_depth(t)
         np.testing.assert_array_equal(result, arr)
 
+    def test_numpy_hwc_single_channel(self):
+        arr = np.random.rand(4, 6, 1).astype(np.float32)
+        result = to_numpy_depth(arr)
+        assert result.shape == (4, 6)
+        np.testing.assert_allclose(result, arr[..., 0], atol=1e-7)
+
 
 # ---------------------------------------------------------------------------
 # to_numpy_rgb
@@ -81,6 +87,13 @@ class TestToNumpyRgb:
         np.testing.assert_allclose(result[:, :, 1], 0.2, atol=1e-6)
         np.testing.assert_allclose(result[:, :, 2], 0.3, atol=1e-6)
 
+    def test_tensor_chw_with_width_three_still_transposes(self):
+        t = torch.rand(3, 4, 3)
+        result = to_numpy_rgb(t)
+        assert result.shape == (4, 3, 3)
+        expected = np.transpose(t.detach().cpu().numpy(), (1, 2, 0))
+        np.testing.assert_allclose(result, expected, atol=1e-7)
+
 
 # ---------------------------------------------------------------------------
 # to_numpy_mask
@@ -114,6 +127,14 @@ class TestToNumpyMask:
         result = to_numpy_mask(arr)
         assert result.dtype == bool
         # Any nonzero is True
+        assert result[0, 0] is np.True_
+        assert result[0, 1] is np.False_
+
+    def test_numpy_hwc_single_channel(self):
+        arr = np.array([[[1], [0]], [[0], [1]]], dtype=np.uint8)
+        result = to_numpy_mask(arr)
+        assert result.shape == (2, 2)
+        assert result.dtype == bool
         assert result[0, 0] is np.True_
         assert result[0, 1] is np.False_
 
@@ -156,13 +177,17 @@ class TestProcessDepth:
 
     def test_radial_skips_conversion(self, sample_K):
         depth = np.ones((4, 6), dtype=np.float32) * 10.0
-        result = process_depth(depth, scale_to_meters=1.0, is_radial=True, intrinsics_K=sample_K)
+        result = process_depth(
+            depth, scale_to_meters=1.0, is_radial=True, intrinsics_K=sample_K
+        )
         # When radial=True, no conversion should happen
         np.testing.assert_array_equal(result, depth)
 
     def test_planar_to_radial_conversion(self, sample_K):
         depth = np.ones((4, 6), dtype=np.float32) * 10.0
-        result = process_depth(depth, scale_to_meters=1.0, is_radial=False, intrinsics_K=sample_K)
+        result = process_depth(
+            depth, scale_to_meters=1.0, is_radial=False, intrinsics_K=sample_K
+        )
         # Center pixel (cx=319.5, cy=239.5) is far from (4,6) image, so all
         # pixels have significant correction. Result should be >= input.
         assert result.dtype == np.float32
@@ -172,13 +197,17 @@ class TestProcessDepth:
 
     def test_planar_without_K_does_nothing(self):
         depth = np.ones((2, 2), dtype=np.float32) * 5.0
-        result = process_depth(depth, scale_to_meters=1.0, is_radial=False, intrinsics_K=None)
+        result = process_depth(
+            depth, scale_to_meters=1.0, is_radial=False, intrinsics_K=None
+        )
         # No K provided, so planar-to-radial skipped even though is_radial=False
         np.testing.assert_array_equal(result, depth)
 
     def test_scale_and_convert_combined(self, sample_K):
         depth = np.ones((4, 6), dtype=np.float32) * 1000.0
-        result = process_depth(depth, scale_to_meters=0.001, is_radial=False, intrinsics_K=sample_K)
+        result = process_depth(
+            depth, scale_to_meters=0.001, is_radial=False, intrinsics_K=sample_K
+        )
         # After scaling: 1.0 everywhere, then planar→radial should increase
         assert np.all(result >= 1.0)
 

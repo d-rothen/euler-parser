@@ -9,12 +9,10 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import torch
-
 from ds_crawler import index_dataset_from_path
 from euler_loading import Modality, MultiModalDataset, resolve_loader_module
 
 from .metrics.utils import convert_planar_to_radial
-
 
 # ---------------------------------------------------------------------------
 # Tensor → numpy conversions
@@ -30,9 +28,33 @@ def to_numpy_depth(data: Any) -> np.ndarray:
         arr = data.detach().cpu().numpy()
     else:
         arr = np.asarray(data, dtype=np.float32)
-    if arr.ndim == 3 and arr.shape[0] == 1:
-        arr = arr[0]
-    return arr.astype(np.float32)
+
+    if arr.ndim == 2:
+        return arr.astype(np.float32)
+
+    if arr.ndim == 3:
+        if arr.shape[0] == 1:
+            arr = arr[0]
+        elif arr.shape[-1] == 1:
+            arr = arr[..., 0]
+        else:
+            raise ValueError(
+                f"Unsupported depth shape {arr.shape}. Expected (H,W), (1,H,W), or (H,W,1)."
+            )
+        return arr.astype(np.float32)
+
+    if arr.ndim == 4:
+        if arr.shape[0] == 1 and arr.shape[1] == 1:
+            arr = arr[0, 0]
+        elif arr.shape[0] == 1 and arr.shape[-1] == 1:
+            arr = arr[0, ..., 0]
+        else:
+            raise ValueError(
+                f"Unsupported depth shape {arr.shape}. Expected a single-sample/single-channel tensor."
+            )
+        return arr.astype(np.float32)
+
+    raise ValueError(f"Unsupported depth rank {arr.ndim} for shape {arr.shape}.")
 
 
 def to_numpy_rgb(data: Any) -> np.ndarray:
@@ -40,13 +62,37 @@ def to_numpy_rgb(data: Any) -> np.ndarray:
 
     Accepts torch tensors ``(3, H, W)`` or ``(H, W, 3)``, or numpy arrays.
     """
-    if isinstance(data, torch.Tensor):
+    tensor_input = isinstance(data, torch.Tensor)
+    if tensor_input:
         arr = data.detach().cpu().numpy()
     else:
         arr = np.asarray(data, dtype=np.float32)
-    # CHW → HWC
-    if arr.ndim == 3 and arr.shape[0] == 3 and arr.shape[2] != 3:
+
+    if arr.ndim == 4 and arr.shape[0] == 1:
+        arr = arr[0]
+
+    if arr.ndim != 3:
+        raise ValueError(
+            f"Unsupported RGB shape {arr.shape}. Expected (H,W,3), (3,H,W), or single-sample variants."
+        )
+
+    # Tensor RGB from loaders is typically CHW.
+    if tensor_input and arr.shape[0] == 3:
         arr = np.transpose(arr, (1, 2, 0))
+    elif arr.shape[-1] == 3 and arr.shape[0] != 3:
+        pass  # HWC
+    elif arr.shape[0] == 3 and arr.shape[-1] != 3:
+        arr = np.transpose(arr, (1, 2, 0))  # CHW
+    elif arr.shape[0] == 3 and arr.shape[-1] == 3:
+        raise ValueError(
+            f"Ambiguous RGB layout for shape {arr.shape}. "
+            "Please provide explicit HWC data or tensor CHW data."
+        )
+    else:
+        raise ValueError(
+            f"Unsupported RGB shape {arr.shape}. Expected channel dimension of size 3."
+        )
+
     return arr.astype(np.float32)
 
 
@@ -59,9 +105,33 @@ def to_numpy_mask(data: Any) -> np.ndarray:
         arr = data.detach().cpu().numpy()
     else:
         arr = np.asarray(data)
-    if arr.ndim == 3 and arr.shape[0] == 1:
-        arr = arr[0]
-    return arr.astype(bool)
+
+    if arr.ndim == 2:
+        return arr.astype(bool)
+
+    if arr.ndim == 3:
+        if arr.shape[0] == 1:
+            arr = arr[0]
+        elif arr.shape[-1] == 1:
+            arr = arr[..., 0]
+        else:
+            raise ValueError(
+                f"Unsupported mask shape {arr.shape}. Expected (H,W), (1,H,W), or (H,W,1)."
+            )
+        return arr.astype(bool)
+
+    if arr.ndim == 4:
+        if arr.shape[0] == 1 and arr.shape[1] == 1:
+            arr = arr[0, 0]
+        elif arr.shape[0] == 1 and arr.shape[-1] == 1:
+            arr = arr[0, ..., 0]
+        else:
+            raise ValueError(
+                f"Unsupported mask shape {arr.shape}. Expected a single-sample/single-channel tensor."
+            )
+        return arr.astype(bool)
+
+    raise ValueError(f"Unsupported mask rank {arr.ndim} for shape {arr.shape}.")
 
 
 def to_numpy_intrinsics(data: Any) -> np.ndarray:
@@ -140,8 +210,7 @@ def align_to_prediction(gt: np.ndarray, pred: np.ndarray) -> np.ndarray:
 
     # Detect VAE multiple-of-8 crop: pred dims are multiples of 8 and
     # the GT is at most 7 pixels larger on each axis.
-    if (pred_h % 8 == 0 and pred_w % 8 == 0
-            and 0 <= dh < 8 and 0 <= dw < 8):
+    if pred_h % 8 == 0 and pred_w % 8 == 0 and 0 <= dh < 8 and 0 <= dw < 8:
         return gt[:pred_h, :pred_w]
 
     # Fallback: resize GT to match prediction dimensions.
@@ -263,9 +332,7 @@ def build_depth_eval_dataset(
         hierarchical["calibration"] = Modality(path=calibration_path)
     if segmentation_path is not None:
         sky_fn = _resolve_sky_mask_loader(segmentation_path)
-        hierarchical["segmentation"] = Modality(
-            path=segmentation_path, loader=sky_fn
-        )
+        hierarchical["segmentation"] = Modality(path=segmentation_path, loader=sky_fn)
 
     return MultiModalDataset(
         modalities=modalities,
@@ -310,9 +377,7 @@ def build_rgb_eval_dataset(
         hierarchical["calibration"] = Modality(path=calibration_path)
     if segmentation_path is not None:
         sky_fn = _resolve_sky_mask_loader(segmentation_path)
-        hierarchical["segmentation"] = Modality(
-            path=segmentation_path, loader=sky_fn
-        )
+        hierarchical["segmentation"] = Modality(path=segmentation_path, loader=sky_fn)
 
     return MultiModalDataset(
         modalities=modalities,
