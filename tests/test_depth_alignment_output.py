@@ -191,7 +191,6 @@ def test_depth_output_contains_raw_and_aligned(monkeypatch):
 
     results = eval_mod.evaluate_depth_samples(
         dataset=_make_dataset(),
-        scale_to_meters=1.0,
         is_radial=True,
         device="cpu",
         alignment_mode="auto_affine",
@@ -224,7 +223,6 @@ def test_depth_alignment_none_keeps_raw_and_aligned_equal(monkeypatch):
 
     results = eval_mod.evaluate_depth_samples(
         dataset=_make_dataset(),
-        scale_to_meters=1.0,
         is_radial=True,
         device="cpu",
         alignment_mode="none",

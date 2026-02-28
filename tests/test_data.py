@@ -221,10 +221,10 @@ class TestGetDepthMetadata:
     def test_reads_from_output_json(self, mock_dataset, depth_index_output):
         ds = mock_dataset({"gt": depth_index_output})
         meta = get_depth_metadata(ds)
-        assert meta["scale_to_meters"] == 0.01
+        assert meta["scale_to_meters"] == 1.0
         assert meta["radial_depth"] is False
 
-    def test_vkitti2_loader_overrides_legacy_scale(self, mock_dataset):
+    def test_ignores_manifest_scale_and_uses_meters(self, mock_dataset):
         ds = mock_dataset(
             {
                 "gt": {
@@ -252,7 +252,7 @@ class TestGetDepthMetadata:
     def test_partial_meta(self, mock_dataset):
         ds = mock_dataset({"gt": {"meta": {"scale_to_meters": 0.5}}})
         meta = get_depth_metadata(ds)
-        assert meta["scale_to_meters"] == 0.5
+        assert meta["scale_to_meters"] == 1.0
         assert meta["radial_depth"] is True  # default
 
 

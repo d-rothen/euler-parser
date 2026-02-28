@@ -75,7 +75,6 @@ python main.py <config> [options]
 | `--no-sanity-check` | flag | off | Disable sanity checking of metric configurations |
 | `--metrics-config` | `str` | auto-detect | Path to `metrics_config.json` for sanity checking |
 | `--depth-alignment` | `{none,auto_affine,affine}` | `auto_affine` | Depth alignment mode (`depth` output uses aligned branch) |
-| `--sns`, `--no-sns` | flag | deprecated | Backward-compatible alias for `--depth-alignment auto_affine/none` |
 
 ### Examples
 
@@ -178,7 +177,7 @@ Loaders are resolved automatically by euler_loading from each dataset directory'
 
 No manual loader selection is required. Each dataset directory declares its own loader through its ds-crawler configuration.
 
-Dataset metadata (e.g. `scale_to_meters`, `radial_depth`, `rgb_range`) is read automatically from the dataset's `output.json` manifest via `get_modality_metadata()`.
+Dataset metadata (e.g. `radial_depth`, `rgb_range`) is read automatically from the dataset's `output.json` manifest via `get_modality_metadata()`. Depth is assumed to already be in meters.
 
 ### Dataset manifest (`output.json`)
 

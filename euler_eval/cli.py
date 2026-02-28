@@ -8,7 +8,6 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Optional
 
 import torch
 
@@ -68,26 +67,6 @@ def print_device_info(requested_device: str, resolved_device: str) -> None:
             print(f"GPU: {torch.cuda.get_device_name(idx)}")
         except Exception:
             pass
-
-
-def resolve_depth_alignment(depth_alignment: str, sns: Optional[bool]) -> str:
-    """Resolve depth alignment mode with deprecated --sns compatibility."""
-    if sns is None:
-        return depth_alignment
-
-    mapped = "auto_affine" if sns else "none"
-    if depth_alignment != "auto_affine":
-        print(
-            "Warning: --sns/--no-sns is ignored because --depth-alignment is set.",
-            file=sys.stderr,
-        )
-        return depth_alignment
-
-    print(
-        "Warning: --sns/--no-sns is deprecated. Use --depth-alignment instead.",
-        file=sys.stderr,
-    )
-    return mapped
 
 
 def validate_gt_config(gt: dict) -> None:
@@ -294,15 +273,8 @@ def main():
         choices=["none", "auto_affine", "affine"],
         help="Depth alignment mode: none, auto_affine (default), or affine",
     )
-    parser.add_argument(
-        "--sns",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Deprecated alias for --depth-alignment auto_affine/none",
-    )
 
     args = parser.parse_args()
-    args.depth_alignment = resolve_depth_alignment(args.depth_alignment, args.sns)
 
     # Load and validate config
     try:
@@ -391,13 +363,11 @@ def main():
             et_eval_datasets["depth"] = depth_dataset
 
             depth_meta = get_depth_metadata(depth_dataset)
-            print(f"  scale_to_meters: {depth_meta['scale_to_meters']}")
             print(f"  radial_depth: {depth_meta['radial_depth']}")
             print(f"  Matched pairs: {len(depth_dataset)}")
 
             depth_results = evaluate_depth_samples(
                 dataset=depth_dataset,
-                scale_to_meters=depth_meta["scale_to_meters"],
                 is_radial=depth_meta["radial_depth"],
                 gt_name=gt.get("name", "GT"),
                 pred_name=ds_name,

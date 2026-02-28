@@ -171,7 +171,6 @@ def _extract_hierarchy(sample: dict) -> tuple[list[str], str]:
 
 def evaluate_depth_samples(
     dataset: MultiModalDataset,
-    scale_to_meters: float,
     is_radial: bool,
     gt_name: str = "GT",
     pred_name: str = "Pred",
@@ -182,7 +181,6 @@ def evaluate_depth_samples(
     sanity_checker: Optional[SanityChecker] = None,
     sky_mask_enabled: bool = False,
     alignment_mode: str = "auto_affine",
-    scale_and_shift: Optional[bool] = None,
 ) -> dict:
     """Evaluate all depth metrics from a MultiModalDataset.
 
@@ -191,7 +189,6 @@ def evaluate_depth_samples(
 
     Args:
         dataset: The MultiModalDataset to iterate.
-        scale_to_meters: Multiplier to convert native depth units to metres.
         is_radial: Whether depth is already radial/euclidean.
         gt_name: GT dataset display name.
         pred_name: Prediction dataset display name.
@@ -203,17 +200,12 @@ def evaluate_depth_samples(
         sky_mask_enabled: If True, use segmentation for sky masking.
         alignment_mode: One of ``none``, ``auto_affine``, ``affine``.
             ``auto_affine`` aligns only if predictions look normalized.
-        scale_and_shift: Deprecated bool alias for backward compatibility.
-            If set, overrides ``alignment_mode`` with
-            ``auto_affine`` (True) or ``none`` (False).
 
     Returns:
         Dictionary containing depth aggregate/per-file metrics with:
         ``depth_raw``, ``depth_aligned``, and backward-compatible ``depth``.
     """
     valid_alignment_modes = {"none", "auto_affine", "affine"}
-    if scale_and_shift is not None:
-        alignment_mode = "auto_affine" if scale_and_shift else "none"
     if alignment_mode not in valid_alignment_modes:
         raise ValueError(
             f"Invalid alignment_mode '{alignment_mode}'. "
@@ -479,10 +471,8 @@ def evaluate_depth_samples(
                 )
 
         # Process depth into metric units for raw branch.
-        depth_gt = process_depth(depth_gt, scale_to_meters, is_radial, intrinsics_K)
-        depth_pred_raw = process_depth(
-            depth_pred, scale_to_meters, is_radial, intrinsics_K
-        )
+        depth_gt = process_depth(depth_gt, 1.0, is_radial, intrinsics_K)
+        depth_pred_raw = process_depth(depth_pred, 1.0, is_radial, intrinsics_K)
 
         # Build aligned branch based on selected mode.
         if alignment_mode == "none":
@@ -648,8 +638,8 @@ def evaluate_rgb_samples(
 
     Args:
         dataset: The MultiModalDataset to iterate.
-        depth_meta: Depth metadata dict (scale_to_meters, radial_depth)
-                    for depth-binned metrics. None to skip.
+        depth_meta: Depth metadata dict containing ``radial_depth`` for
+                    depth-binned metrics. None to skip.
         gt_name: GT dataset display name.
         pred_name: Prediction dataset display name.
         device: Computation device.
@@ -810,7 +800,7 @@ def evaluate_rgb_samples(
                 intrinsics_K = _get_intrinsics_K(sample)
                 gt_depth = process_depth(
                     gt_depth_raw,
-                    depth_meta["scale_to_meters"],
+                    1.0,
                     depth_meta["radial_depth"],
                     intrinsics_K,
                 )

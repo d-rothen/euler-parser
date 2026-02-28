@@ -102,22 +102,3 @@ def test_fid_kid_feature_pair_cache_reuses_features(monkeypatch):
     assert len(calls) == 2  # one extraction per side, once
     assert first[0] is second[0]
     assert first[1] is second[1]
-
-
-def test_resolve_depth_alignment_defaults_to_argument():
-    assert cli.resolve_depth_alignment("auto_affine", None) == "auto_affine"
-    assert cli.resolve_depth_alignment("affine", None) == "affine"
-
-
-def test_resolve_depth_alignment_maps_sns_alias(capsys):
-    assert cli.resolve_depth_alignment("auto_affine", True) == "auto_affine"
-    assert cli.resolve_depth_alignment("auto_affine", False) == "none"
-    err = capsys.readouterr().err
-    assert "deprecated" in err
-
-
-def test_resolve_depth_alignment_prefers_explicit_mode_over_sns(capsys):
-    resolved = cli.resolve_depth_alignment("affine", False)
-    assert resolved == "affine"
-    err = capsys.readouterr().err
-    assert "ignored" in err

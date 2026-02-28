@@ -165,15 +165,11 @@ def dataset_root(tmp_path):
     files_dir.mkdir(parents=True)
     rgb_files = _make_files_list("rgb", ".png", NUM_FILES)
     for entry in rgb_files:
-        img = Image.fromarray(
-            np.random.randint(0, 255, size=(H, W, 3), dtype=np.uint8)
-        )
+        img = Image.fromarray(np.random.randint(0, 255, size=(H, W, 3), dtype=np.uint8))
         img.save(gt_rgb_dir / entry["path"])
     _write_output_json(
         gt_rgb_dir,
-        _build_output_json(
-            "test_rgb", "rgb", rgb_files, meta={"rgb_range": [0, 1]}
-        ),
+        _build_output_json("test_rgb", "rgb", rgb_files, meta={"rgb_range": [0, 1]}),
     )
     paths["gt_rgb"] = str(gt_rgb_dir)
 
@@ -182,9 +178,7 @@ def dataset_root(tmp_path):
     files_dir = pred_rgb_dir / "Scene01" / "clone"
     files_dir.mkdir(parents=True)
     for entry in rgb_files:
-        img = Image.fromarray(
-            np.random.randint(0, 255, size=(H, W, 3), dtype=np.uint8)
-        )
+        img = Image.fromarray(np.random.randint(0, 255, size=(H, W, 3), dtype=np.uint8))
         img.save(pred_rgb_dir / entry["path"])
     _write_output_json(
         pred_rgb_dir,
@@ -248,7 +242,7 @@ class TestDepthDatasetIntegration:
             },
         )
         meta = get_depth_metadata(ds)
-        assert meta["scale_to_meters"] == SCALE_TO_METERS
+        assert meta["scale_to_meters"] == 1.0
         assert meta["radial_depth"] is False
 
     def test_sample_structure(self, dataset_root):
@@ -285,16 +279,16 @@ class TestDepthDatasetIntegration:
         assert depth_gt.shape == (H, W)
         assert depth_gt.dtype == np.float32
 
-        # Raw values are 1000-5000, after scaling should be 10-50
+        # Raw values are already in meters (1000-5000 in this fixture)
         processed = process_depth(
             depth_gt,
             scale_to_meters=meta["scale_to_meters"],
             is_radial=meta["radial_depth"],
         )
         assert processed.dtype == np.float32
-        # Without K, planar→radial is skipped, but scaling should apply
-        assert processed.max() <= 50.0
-        assert processed.min() >= 10.0
+        # Without K, planar→radial is skipped, so values should stay unchanged.
+        assert processed.max() <= 5000.0
+        assert processed.min() >= 1000.0
 
     def test_hierarchy_extraction(self, dataset_root):
         ds = MultiModalDataset(
@@ -363,8 +357,8 @@ class TestDepthWithCalibrationIntegration:
             is_radial=meta["radial_depth"],  # False → triggers conversion
             intrinsics_K=K,
         )
-        # After planar→radial, values should be >= the scaled planar depth
-        scaled = depth_gt * meta["scale_to_meters"]
+        # After planar→radial, values should be >= the planar depth.
+        scaled = depth_gt
         assert np.all(processed >= scaled - 1e-5)
 
 
@@ -440,9 +434,7 @@ class TestRgbDatasetIntegration:
             modalities={
                 "gt": Modality(path=dataset_root["gt_rgb"], loader=_load_rgb),
                 "pred": Modality(path=dataset_root["pred_rgb"], loader=_load_rgb),
-                "gt_depth": Modality(
-                    path=dataset_root["gt_depth"], loader=_load_depth
-                ),
+                "gt_depth": Modality(path=dataset_root["gt_depth"], loader=_load_depth),
             },
         )
         sample = ds[0]
@@ -477,7 +469,7 @@ class TestFullPipelineIntegration:
         )
 
         meta = get_depth_metadata(ds)
-        assert meta["scale_to_meters"] == SCALE_TO_METERS
+        assert meta["scale_to_meters"] == 1.0
         assert meta["radial_depth"] is False
 
         for i in range(len(ds)):
@@ -494,7 +486,7 @@ class TestFullPipelineIntegration:
             assert K is not None
             np.testing.assert_array_equal(K, K_MATRIX)
 
-            # Process depth (scale + planar→radial)
+            # Process depth (planar→radial)
             processed_gt = process_depth(
                 depth_gt, meta["scale_to_meters"], meta["radial_depth"], K
             )
@@ -510,11 +502,7 @@ class TestFullPipelineIntegration:
             assert valid_mask[1:, :].all()
 
             # Build combined mask
-            combined = (
-                (processed_gt > 0)
-                & np.isfinite(processed_gt)
-                & valid_mask
-            )
+            combined = (processed_gt > 0) & np.isfinite(processed_gt) & valid_mask
             # Top row excluded by sky mask
             assert not combined[0, :].any()
 

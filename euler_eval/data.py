@@ -152,11 +152,12 @@ def process_depth(
     is_radial: bool,
     intrinsics_K: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Apply scale and optional planar→radial conversion to a depth map.
+    """Apply optional scaling and planar→radial conversion to a depth map.
 
     Args:
-        depth: Raw depth array ``(H, W)`` in loader-native units.
-        scale_to_meters: Multiplier to convert to metres.
+        depth: Depth array ``(H, W)``.
+        scale_to_meters: Legacy multiplier to convert to metres.
+            For euler_loading-provided depth, this should remain ``1.0``.
         is_radial: If True, depth is already radial (Euclidean).
                    If False and ``intrinsics_K`` is provided, convert.
         intrinsics_K: ``(3, 3)`` camera matrix. Required when
@@ -389,29 +390,14 @@ def get_depth_metadata(dataset: MultiModalDataset) -> dict[str, Any]:
     """Extract depth modality metadata from a dataset.
 
     Returns:
-        Dict with ``scale_to_meters`` (float) and ``radial_depth`` (bool).
+        Dict with ``scale_to_meters`` (float, always 1.0) and
+        ``radial_depth`` (bool).
     """
     meta = dataset.get_modality_metadata("gt")
-    scale_to_meters = float(meta.get("scale_to_meters", 1.0))
-
-    # Some built-in loaders already return depth in meters.
-    # In these cases, legacy manifests may still carry scale_to_meters=0.01.
-    index_outputs = getattr(dataset, "_index_outputs", {})
-    if isinstance(index_outputs, dict):
-        gt_index = index_outputs.get("gt", {})
-        if isinstance(gt_index, dict):
-            euler_loading = gt_index.get("euler_loading", {})
-            if isinstance(euler_loading, dict):
-                loader_name = euler_loading.get("loader")
-                function_name = euler_loading.get("function")
-                if function_name == "depth" and loader_name in {
-                    "vkitti2",
-                    "real_drive_sim",
-                }:
-                    scale_to_meters = 1.0
 
     return {
-        "scale_to_meters": scale_to_meters,
+        # euler_loading is expected to return depth in metres.
+        "scale_to_meters": 1.0,
         "radial_depth": bool(meta.get("radial_depth", True)),
     }
 
