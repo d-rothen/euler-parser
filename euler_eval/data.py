@@ -325,7 +325,7 @@ def build_depth_eval_dataset(
     """
     modalities = {
         "gt": Modality(path=gt_depth_path),
-        "pred": Modality(path=pred_depth_path),
+        "pred": Modality(path=pred_depth_path, used_as="output"),
     }
 
     hierarchical = {}
@@ -368,7 +368,7 @@ def build_rgb_eval_dataset(
     """
     modalities: dict[str, Modality] = {
         "gt": Modality(path=gt_rgb_path),
-        "pred": Modality(path=pred_rgb_path),
+        "pred": Modality(path=pred_rgb_path, used_as="output"),
     }
     if gt_depth_path is not None:
         modalities["gt_depth"] = Modality(path=gt_depth_path)

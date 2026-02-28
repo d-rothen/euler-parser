@@ -369,6 +369,7 @@ def main():
             dir=et_config["dir"],
             run_id=et_config.get("run_id"),
             run_name=et_config.get("run_name"),
+            mode="eval",
         )
         print(f"euler_train logging enabled -> {et_run.dir}")
     print("-" * 60)
