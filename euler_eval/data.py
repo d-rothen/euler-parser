@@ -392,8 +392,26 @@ def get_depth_metadata(dataset: MultiModalDataset) -> dict[str, Any]:
         Dict with ``scale_to_meters`` (float) and ``radial_depth`` (bool).
     """
     meta = dataset.get_modality_metadata("gt")
+    scale_to_meters = float(meta.get("scale_to_meters", 1.0))
+
+    # Some built-in loaders already return depth in meters.
+    # In these cases, legacy manifests may still carry scale_to_meters=0.01.
+    index_outputs = getattr(dataset, "_index_outputs", {})
+    if isinstance(index_outputs, dict):
+        gt_index = index_outputs.get("gt", {})
+        if isinstance(gt_index, dict):
+            euler_loading = gt_index.get("euler_loading", {})
+            if isinstance(euler_loading, dict):
+                loader_name = euler_loading.get("loader")
+                function_name = euler_loading.get("function")
+                if function_name == "depth" and loader_name in {
+                    "vkitti2",
+                    "real_drive_sim",
+                }:
+                    scale_to_meters = 1.0
+
     return {
-        "scale_to_meters": float(meta.get("scale_to_meters", 1.0)),
+        "scale_to_meters": scale_to_meters,
         "radial_depth": bool(meta.get("radial_depth", True)),
     }
 

@@ -3,6 +3,8 @@
 Runs all metrics over depth and RGB datasets loaded via euler_loading.
 """
 
+import copy
+
 import numpy as np
 from typing import Optional
 from tqdm import tqdm
@@ -79,12 +81,16 @@ def _compute_array_stats(arr: np.ndarray) -> dict:
     valid_values = arr[valid_mask]
     if len(valid_values) == 0:
         return {
-            "shape": arr.shape, "dtype": str(arr.dtype),
-            "min": float("nan"), "max": float("nan"),
-            "mean": float("nan"), "precision": _get_dtype_precision_str(arr),
+            "shape": arr.shape,
+            "dtype": str(arr.dtype),
+            "min": float("nan"),
+            "max": float("nan"),
+            "mean": float("nan"),
+            "precision": _get_dtype_precision_str(arr),
         }
     return {
-        "shape": arr.shape, "dtype": str(arr.dtype),
+        "shape": arr.shape,
+        "dtype": str(arr.dtype),
         "min": float(np.min(valid_values)),
         "max": float(np.max(valid_values)),
         "mean": float(np.mean(valid_values)),
@@ -99,9 +105,11 @@ def _log_sample_stats(gt: np.ndarray, pred: np.ndarray, label: str) -> None:
     print(f"  {label} SAMPLE STATISTICS")
     print("=" * 77)
     for tag, stats in [("GT", gt_stats), ("Pred", pred_stats)]:
-        print(f"  {tag}: shape={stats['shape']}  dtype={stats['dtype']}  "
-              f"range=[{stats['min']:.4f}, {stats['max']:.4f}]  "
-              f"mean={stats['mean']:.4f}")
+        print(
+            f"  {tag}: shape={stats['shape']}  dtype={stats['dtype']}  "
+            f"range=[{stats['min']:.4f}, {stats['max']:.4f}]  "
+            f"mean={stats['mean']:.4f}"
+        )
     print("=" * 77 + "\n")
 
 
@@ -173,16 +181,45 @@ def evaluate_depth_samples(
     verbose: bool = False,
     sanity_checker: Optional[SanityChecker] = None,
     sky_mask_enabled: bool = False,
-    scale_and_shift: bool = True,
+    alignment_mode: str = "auto_affine",
+    scale_and_shift: Optional[bool] = None,
 ) -> dict:
     """Evaluate all depth metrics from a MultiModalDataset.
 
     The dataset must yield samples with ``"gt"`` and ``"pred"`` keys
     containing depth data (tensors or arrays).
 
+    Args:
+        dataset: The MultiModalDataset to iterate.
+        scale_to_meters: Multiplier to convert native depth units to metres.
+        is_radial: Whether depth is already radial/euclidean.
+        gt_name: GT dataset display name.
+        pred_name: Prediction dataset display name.
+        device: Computation device.
+        batch_size: Batch size for batched metrics.
+        num_workers: Data loading workers.
+        verbose: Enable verbose output.
+        sanity_checker: Optional SanityChecker.
+        sky_mask_enabled: If True, use segmentation for sky masking.
+        alignment_mode: One of ``none``, ``auto_affine``, ``affine``.
+            ``auto_affine`` aligns only if predictions look normalized.
+        scale_and_shift: Deprecated bool alias for backward compatibility.
+            If set, overrides ``alignment_mode`` with
+            ``auto_affine`` (True) or ``none`` (False).
+
     Returns:
-        Dictionary containing aggregate and per-file metrics.
+        Dictionary containing depth aggregate/per-file metrics with:
+        ``depth_raw``, ``depth_aligned``, and backward-compatible ``depth``.
     """
+    valid_alignment_modes = {"none", "auto_affine", "affine"}
+    if scale_and_shift is not None:
+        alignment_mode = "auto_affine" if scale_and_shift else "none"
+    if alignment_mode not in valid_alignment_modes:
+        raise ValueError(
+            f"Invalid alignment_mode '{alignment_mode}'. "
+            f"Expected one of {sorted(valid_alignment_modes)}."
+        )
+
     num_samples = len(dataset)
     if num_samples == 0:
         raise ValueError("Dataset has no matched samples")
@@ -191,30 +228,211 @@ def evaluate_depth_samples(
     lpips_metric = LPIPSMetric(device=device)
     fid_kid_metric = FIDKIDMetric(device=device)
 
-    # Per-image storage
-    psnr_values = []
-    ssim_values = []
-    lpips_values = []
-    absrel_values = []
-    rmse_values = []
-    silog_values = []
-    silog_full_values = []
-    normal_angle_values = []
-    edge_f1_results = []
+    def _init_metric_store() -> dict:
+        return {
+            "psnr_values": [],
+            "ssim_values": [],
+            "lpips_values": [],
+            "absrel_values": [],
+            "rmse_values": [],
+            "silog_values": [],
+            "silog_full_values": [],
+            "normal_angle_values": [],
+            "edge_f1_results": [],
+            "all_depths_pred": [],
+            "psnr_metadata_list": [],
+            "ssim_metadata_list": [],
+            "absrel_metadata_list": [],
+            "normal_metadata_list": [],
+        }
+
+    stores = {
+        "raw": _init_metric_store(),
+        "aligned": _init_metric_store(),
+    }
     processed_entries = []
-
     all_depths_gt = []
-    all_depths_pred = []
-
-    # Sanity check metadata
-    psnr_metadata_list = []
-    ssim_metadata_list = []
-    absrel_metadata_list = []
-    normal_metadata_list = []
 
     logged_stats = False
     logged_alignment = False
-    do_alignment = False
+    normalized_predictions = False
+    alignment_applied = False
+
+    if alignment_mode == "none":
+        print("Depth alignment mode: none (raw predictions only)")
+    elif alignment_mode == "auto_affine":
+        print("Depth alignment mode: auto_affine (normalized-depth detection)")
+    else:
+        print("Depth alignment mode: affine (always apply scale-and-shift)")
+
+    def _compute_branch_metrics(
+        depth_gt: np.ndarray, depth_pred: np.ndarray, valid_mask: Optional[np.ndarray]
+    ) -> dict:
+        psnr_val, psnr_meta = compute_psnr(
+            depth_pred, depth_gt, valid_mask=valid_mask, return_metadata=True
+        )
+        ssim_val, ssim_meta = compute_ssim(depth_pred, depth_gt, return_metadata=True)
+        absrel_arr, absrel_meta = compute_absrel(
+            depth_pred, depth_gt, valid_mask=valid_mask, return_metadata=True
+        )
+        rmse_arr = compute_rmse_per_pixel(depth_pred, depth_gt, valid_mask=valid_mask)
+        silog_arr = compute_silog_per_pixel(depth_pred, depth_gt, valid_mask=valid_mask)
+        silog_val = compute_scale_invariant_log_error(
+            depth_pred, depth_gt, valid_mask=valid_mask
+        )
+        normal_angles, normal_meta = compute_normal_angles(
+            depth_pred, depth_gt, valid_mask=valid_mask, return_metadata=True
+        )
+        edge_f1 = compute_depth_edge_f1(depth_pred, depth_gt, valid_mask=valid_mask)
+
+        return {
+            "psnr_val": psnr_val,
+            "psnr_meta": psnr_meta,
+            "ssim_val": ssim_val,
+            "ssim_meta": ssim_meta,
+            "lpips_val": lpips_metric.compute(depth_pred, depth_gt),
+            "absrel_arr": absrel_arr,
+            "absrel_meta": absrel_meta,
+            "rmse_arr": rmse_arr,
+            "silog_arr": silog_arr,
+            "silog_full": silog_val,
+            "normal_angles": normal_angles,
+            "normal_meta": normal_meta,
+            "edge_f1": edge_f1,
+        }
+
+    def _append_metrics(store: dict, metrics: dict, depth_pred: np.ndarray) -> None:
+        store["psnr_values"].append(metrics["psnr_val"])
+        store["ssim_values"].append(metrics["ssim_val"])
+        store["lpips_values"].append(metrics["lpips_val"])
+        store["absrel_values"].append(metrics["absrel_arr"])
+        store["rmse_values"].append(metrics["rmse_arr"])
+        store["silog_values"].append(metrics["silog_arr"])
+        store["silog_full_values"].append(metrics["silog_full"])
+        store["normal_angle_values"].append(metrics["normal_angles"])
+        store["edge_f1_results"].append(metrics["edge_f1"])
+        store["all_depths_pred"].append(depth_pred)
+        store["psnr_metadata_list"].append(metrics["psnr_meta"])
+        store["ssim_metadata_list"].append(metrics["ssim_meta"])
+        store["absrel_metadata_list"].append(metrics["absrel_meta"])
+        store["normal_metadata_list"].append(metrics["normal_meta"])
+
+    def _build_valid_mask(
+        depth_gt: np.ndarray, depth_pred: np.ndarray, sky_valid: Optional[np.ndarray]
+    ) -> Optional[np.ndarray]:
+        if sky_valid is None:
+            return None
+        return (
+            (depth_gt > 0)
+            & (depth_pred > 0)
+            & np.isfinite(depth_gt)
+            & np.isfinite(depth_pred)
+            & sky_valid
+        )
+
+    def _safe_mean(values: list[float]) -> Optional[float]:
+        valid = [float(v) for v in values if np.isfinite(v)]
+        if not valid:
+            return None
+        return float(np.mean(valid))
+
+    def _build_depth_summary(
+        store: dict, alignment_label: str, alignment_applied_flag: bool
+    ) -> dict:
+        absrel_agg = aggregate_absrel(store["absrel_values"])
+        rmse_agg = aggregate_rmse(store["rmse_values"])
+        silog_agg = aggregate_silog(store["silog_values"])
+        normal_agg = aggregate_normal_consistency(store["normal_angle_values"])
+        edge_f1_agg = aggregate_edge_f1(store["edge_f1_results"])
+
+        fid_value = fid_kid_metric.compute_fid(
+            all_depths_gt, store["all_depths_pred"], batch_size, num_workers
+        )
+        kid_mean, kid_std = fid_kid_metric.compute_kid(
+            all_depths_gt, store["all_depths_pred"], batch_size, num_workers
+        )
+
+        return {
+            "image_quality": {
+                "psnr": _safe_mean(store["psnr_values"]),
+                "ssim": _safe_mean(store["ssim_values"]),
+                "lpips": _safe_mean(store["lpips_values"]),
+                "fid": fid_value,
+                "kid_mean": kid_mean,
+                "kid_std": kid_std,
+            },
+            "depth_metrics": {
+                "absrel": {"median": absrel_agg["median"], "p90": absrel_agg["p90"]},
+                "rmse": {"median": rmse_agg["median"], "p90": rmse_agg["p90"]},
+                "silog": {
+                    "mean": _safe_mean(store["silog_full_values"]),
+                    "median": silog_agg["median"],
+                    "p90": silog_agg["p90"],
+                },
+            },
+            "geometric_metrics": {
+                "normal_consistency": {
+                    "mean_angle": normal_agg["mean_angle"],
+                    "median_angle": normal_agg["median_angle"],
+                    "percent_below_11_25": normal_agg["percent_below_11_25"],
+                    "percent_below_22_5": normal_agg["percent_below_22_5"],
+                    "percent_below_30": normal_agg["percent_below_30"],
+                },
+                "depth_edge_f1": {
+                    "precision": edge_f1_agg["precision"],
+                    "recall": edge_f1_agg["recall"],
+                    "f1": edge_f1_agg["f1"],
+                },
+            },
+            "dataset_info": {
+                "num_pairs": num_samples,
+                "gt_name": gt_name,
+                "pred_name": pred_name,
+            },
+            "alignment": {
+                "mode": alignment_label,
+                "applied": alignment_applied_flag,
+            },
+        }
+
+    def _build_per_file_depth_value(store: dict, index: int) -> dict:
+        absrel_arr = store["absrel_values"][index]
+        rmse_arr = store["rmse_values"][index]
+        normal_angles = store["normal_angle_values"][index]
+        edge_f1 = store["edge_f1_results"][index]
+
+        return {
+            "image_quality": {
+                "psnr": float(store["psnr_values"][index])
+                if np.isfinite(store["psnr_values"][index])
+                else None,
+                "ssim": float(store["ssim_values"][index])
+                if np.isfinite(store["ssim_values"][index])
+                else None,
+                "lpips": float(store["lpips_values"][index]),
+            },
+            "depth_metrics": {
+                "absrel": float(np.mean(absrel_arr)) if len(absrel_arr) > 0 else None,
+                "rmse": float(np.sqrt(np.mean(rmse_arr)))
+                if len(rmse_arr) > 0
+                else None,
+                "silog": float(store["silog_full_values"][index])
+                if np.isfinite(store["silog_full_values"][index])
+                else None,
+            },
+            "geometric_metrics": {
+                "normal_consistency": {
+                    "mean_angle": float(np.mean(normal_angles))
+                    if len(normal_angles) > 0
+                    else None,
+                },
+                "depth_edge_f1": {
+                    "precision": float(edge_f1["precision"]),
+                    "recall": float(edge_f1["recall"]),
+                    "f1": float(edge_f1["f1"]),
+                },
+            },
+        }
 
     print("Computing per-image depth metrics...")
     for i in tqdm(range(num_samples), desc="Processing depth pairs"):
@@ -243,12 +461,12 @@ def evaluate_depth_samples(
             if sky_valid is not None and sky_valid.shape[:2] != depth_pred.shape[:2]:
                 sky_valid = align_to_prediction(sky_valid, depth_pred)
 
-        # Detect normalized predictions on first sample
-        if scale_and_shift and i == 0:
+        # Detect normalized predictions on first sample for auto mode.
+        if alignment_mode == "auto_affine" and i == 0:
             pred_min = float(np.nanmin(depth_pred))
             pred_max = float(np.nanmax(depth_pred))
             if pred_max <= 1.0 + 1e-3 and pred_min >= -1.0 - 1e-3:
-                do_alignment = True
+                normalized_predictions = True
                 print(
                     f"  Scale-and-shift: detected normalized predictions "
                     f"(range [{pred_min:.3f}, {pred_max:.3f}])"
@@ -260,209 +478,146 @@ def evaluate_depth_samples(
                     f"skipping alignment"
                 )
 
-        # Process depth: GT always gets scale/radial conversion;
-        # pred is either processed the same way or aligned via LSQ.
+        # Process depth into metric units for raw branch.
         depth_gt = process_depth(depth_gt, scale_to_meters, is_radial, intrinsics_K)
+        depth_pred_raw = process_depth(
+            depth_pred, scale_to_meters, is_radial, intrinsics_K
+        )
 
-        if do_alignment:
-            fit_mask = (depth_gt > 0) & np.isfinite(depth_gt) & np.isfinite(depth_pred)
-            if sky_valid is not None:
-                fit_mask = fit_mask & sky_valid
-            depth_pred, s, t = compute_scale_and_shift(
-                depth_pred, depth_gt, fit_mask,
-            )
-            if verbose and not logged_stats:
-                print(f"  Fitted scale={s:.4f}, shift={t:.4f}")
+        # Build aligned branch based on selected mode.
+        if alignment_mode == "none":
+            depth_pred_aligned = depth_pred_raw
         else:
-            depth_pred = process_depth(
-                depth_pred, scale_to_meters, is_radial, intrinsics_K,
-            )
+            do_alignment = alignment_mode == "affine" or normalized_predictions
+            if do_alignment:
+                # In auto mode, fit on native prediction values when they are
+                # normalized. In affine mode, fit on metric-converted values.
+                fit_source = depth_pred if normalized_predictions else depth_pred_raw
+                fit_mask = (
+                    (depth_gt > 0) & np.isfinite(depth_gt) & np.isfinite(fit_source)
+                )
+                if sky_valid is not None:
+                    fit_mask = fit_mask & sky_valid
+                depth_pred_aligned, s, t = compute_scale_and_shift(
+                    fit_source, depth_gt, fit_mask
+                )
+                alignment_applied = True
+                if verbose and not logged_stats:
+                    print(f"  Fitted scale={s:.4f}, shift={t:.4f}")
+            else:
+                depth_pred_aligned = depth_pred_raw
 
         # Log statistics for first sample
         if verbose and not logged_stats:
-            _log_sample_stats(depth_gt, depth_pred, "DEPTH")
+            _log_sample_stats(depth_gt, depth_pred_aligned, "DEPTH")
             logged_stats = True
 
-        # Build valid mask (optionally excluding sky)
-        valid_mask = None
-        if sky_valid is not None:
-            valid_mask = (
-                (depth_gt > 0) & (depth_pred > 0)
-                & np.isfinite(depth_gt) & np.isfinite(depth_pred)
-                & sky_valid
-            )
-
         all_depths_gt.append(depth_gt)
-        all_depths_pred.append(depth_pred)
         processed_entries.append({"hierarchy": hierarchy, "id": entry_id})
 
+        raw_valid_mask = _build_valid_mask(depth_gt, depth_pred_raw, sky_valid)
+        aligned_valid_mask = _build_valid_mask(depth_gt, depth_pred_aligned, sky_valid)
+
+        raw_metrics = _compute_branch_metrics(depth_gt, depth_pred_raw, raw_valid_mask)
+        _append_metrics(stores["raw"], raw_metrics, depth_pred_raw)
+
+        if depth_pred_aligned is depth_pred_raw:
+            _append_metrics(stores["aligned"], raw_metrics, depth_pred_aligned)
+        else:
+            aligned_metrics = _compute_branch_metrics(
+                depth_gt, depth_pred_aligned, aligned_valid_mask
+            )
+            _append_metrics(stores["aligned"], aligned_metrics, depth_pred_aligned)
+
         if sanity_checker is not None:
-            sanity_checker.validate_depth_input(depth_gt, depth_pred, entry_id)
-
-        # Image quality metrics
-        psnr_val, psnr_meta = compute_psnr(
-            depth_pred, depth_gt, valid_mask=valid_mask, return_metadata=True
-        )
-        psnr_values.append(psnr_val)
-        psnr_metadata_list.append(psnr_meta)
-
-        ssim_val, ssim_meta = compute_ssim(depth_pred, depth_gt, return_metadata=True)
-        ssim_values.append(ssim_val)
-        ssim_metadata_list.append(ssim_meta)
-
-        lpips_values.append(lpips_metric.compute(depth_pred, depth_gt))
-
-        # Depth-specific metrics
-        absrel_arr, absrel_meta = compute_absrel(
-            depth_pred, depth_gt, valid_mask=valid_mask, return_metadata=True
-        )
-        absrel_values.append(absrel_arr)
-        absrel_metadata_list.append(absrel_meta)
-
-        rmse_values.append(
-            compute_rmse_per_pixel(depth_pred, depth_gt, valid_mask=valid_mask)
-        )
-        silog_values.append(
-            compute_silog_per_pixel(depth_pred, depth_gt, valid_mask=valid_mask)
-        )
-        silog_full_values.append(
-            compute_scale_invariant_log_error(depth_pred, depth_gt, valid_mask=valid_mask)
-        )
-
-        # Geometric metrics
-        normal_angles, normal_meta = compute_normal_angles(
-            depth_pred, depth_gt, valid_mask=valid_mask, return_metadata=True
-        )
-        normal_angle_values.append(normal_angles)
-        normal_metadata_list.append(normal_meta)
-
-        edge_f1_results.append(
-            compute_depth_edge_f1(depth_pred, depth_gt, valid_mask=valid_mask)
-        )
-
-    # FID / KID
-    print("Computing FID/KID (this may take a while)...")
-    fid_value = fid_kid_metric.compute_fid(
-        all_depths_gt, all_depths_pred, batch_size, num_workers
-    )
-    kid_mean, kid_std = fid_kid_metric.compute_kid(
-        all_depths_gt, all_depths_pred, batch_size, num_workers
-    )
-
-    # Aggregate
-    print("Aggregating depth results...")
-    absrel_agg = aggregate_absrel(absrel_values)
-    rmse_agg = aggregate_rmse(rmse_values)
-    silog_agg = aggregate_silog(silog_values)
-    normal_agg = aggregate_normal_consistency(normal_angle_values)
-    edge_f1_agg = aggregate_edge_f1(edge_f1_results)
+            sanity_checker.validate_depth_input(depth_gt, depth_pred_aligned, entry_id)
 
     # Post-processing sanity checks
     if sanity_checker is not None:
         print("Running post-processing sanity checks...")
         for i, entry in enumerate(processed_entries):
             eid = entry["id"]
-            pm = psnr_metadata_list[i]
+            pm = stores["aligned"]["psnr_metadata_list"][i]
             if pm["max_val_used"] is not None:
-                sanity_checker.validate_depth_psnr(psnr_values[i], pm["max_val_used"], eid)
-            sm = ssim_metadata_list[i]
+                sanity_checker.validate_depth_psnr(
+                    stores["aligned"]["psnr_values"][i], pm["max_val_used"], eid
+                )
+            sm = stores["aligned"]["ssim_metadata_list"][i]
             if sm["depth_range"] is not None:
-                sanity_checker.validate_depth_ssim(ssim_values[i], sm["depth_range"], eid)
-            am = absrel_metadata_list[i]
+                sanity_checker.validate_depth_ssim(
+                    stores["aligned"]["ssim_values"][i], sm["depth_range"], eid
+                )
+            am = stores["aligned"]["absrel_metadata_list"][i]
             if am["median"] is not None:
                 sanity_checker.validate_depth_absrel(am["median"], am["p90"], eid)
-            if sm["depth_range"] is not None and len(rmse_values[i]) > 0:
-                rmse_val = float(np.sqrt(np.mean(rmse_values[i])))
+            if (
+                sm["depth_range"] is not None
+                and len(stores["aligned"]["rmse_values"][i]) > 0
+            ):
+                rmse_val = float(np.sqrt(np.mean(stores["aligned"]["rmse_values"][i])))
                 sanity_checker.validate_depth_rmse(rmse_val, sm["depth_range"], eid)
-            sv = silog_full_values[i]
+            sv = stores["aligned"]["silog_full_values"][i]
             if np.isfinite(sv):
                 sanity_checker.validate_depth_silog(sv, eid)
-            nm = normal_metadata_list[i]
+            nm = stores["aligned"]["normal_metadata_list"][i]
             if nm["mean_angle"] is not None:
                 sanity_checker.validate_normal_consistency(
                     nm["mean_angle"], nm["valid_pixels_after_erosion"], eid
                 )
-            ef = edge_f1_results[i]
+            ef = stores["aligned"]["edge_f1_results"][i]
             sanity_checker.validate_depth_edge_f1(
-                ef["pred_edge_pixels"], ef["gt_edge_pixels"],
-                ef["total_pixels"], ef["f1"], eid
+                ef["pred_edge_pixels"],
+                ef["gt_edge_pixels"],
+                ef["total_pixels"],
+                ef["f1"],
+                eid,
             )
+
+    print("Computing FID/KID (this may take a while)...")
+    print("Aggregating depth results...")
+
+    depth_raw = _build_depth_summary(
+        stores["raw"], alignment_label="none", alignment_applied_flag=False
+    )
+    if alignment_applied:
+        depth_aligned = _build_depth_summary(
+            stores["aligned"],
+            alignment_label=alignment_mode,
+            alignment_applied_flag=True,
+        )
+    else:
+        depth_aligned = copy.deepcopy(depth_raw)
+        depth_aligned["alignment"] = {
+            "mode": alignment_mode,
+            "applied": False,
+        }
 
     # Build per-file metrics
     per_file_metrics = {}
     for i, entry in enumerate(processed_entries):
         hierarchy = entry["hierarchy"]
         eid = entry["id"]
-        absrel_arr = absrel_values[i]
-        rmse_arr = rmse_values[i]
-        normal_angles = normal_angle_values[i]
-        edge_f1 = edge_f1_results[i]
-
-        depth_metrics_value = {
-            "depth": {
-                "image_quality": {
-                    "psnr": float(psnr_values[i]) if np.isfinite(psnr_values[i]) else None,
-                    "ssim": float(ssim_values[i]) if np.isfinite(ssim_values[i]) else None,
-                    "lpips": float(lpips_values[i]),
-                },
-                "depth_metrics": {
-                    "absrel": float(np.mean(absrel_arr)) if len(absrel_arr) > 0 else None,
-                    "rmse": float(np.sqrt(np.mean(rmse_arr))) if len(rmse_arr) > 0 else None,
-                    "silog": float(silog_full_values[i]) if np.isfinite(silog_full_values[i]) else None,
-                },
-                "geometric_metrics": {
-                    "normal_consistency": {
-                        "mean_angle": float(np.mean(normal_angles)) if len(normal_angles) > 0 else None,
-                    },
-                    "depth_edge_f1": {
-                        "precision": float(edge_f1["precision"]),
-                        "recall": float(edge_f1["recall"]),
-                        "f1": float(edge_f1["f1"]),
-                    },
+        raw_value = _build_per_file_depth_value(stores["raw"], i)
+        aligned_value = _build_per_file_depth_value(stores["aligned"], i)
+        set_value(
+            per_file_metrics,
+            hierarchy,
+            eid,
+            {
+                "id": eid,
+                "metrics": {
+                    "depth": aligned_value,
+                    "depth_raw": raw_value,
+                    "depth_aligned": aligned_value,
                 },
             },
-        }
-        set_value(per_file_metrics, hierarchy, eid, {"id": eid, "metrics": depth_metrics_value})
+        )
 
     results = {
-        "depth": {
-            "image_quality": {
-                "psnr": float(np.mean([v for v in psnr_values if np.isfinite(v)])),
-                "ssim": float(np.mean([v for v in ssim_values if np.isfinite(v)])),
-                "lpips": float(np.mean(lpips_values)),
-                "fid": fid_value,
-                "kid_mean": kid_mean,
-                "kid_std": kid_std,
-            },
-            "depth_metrics": {
-                "absrel": {"median": absrel_agg["median"], "p90": absrel_agg["p90"]},
-                "rmse": {"median": rmse_agg["median"], "p90": rmse_agg["p90"]},
-                "silog": {
-                    "mean": float(np.mean([v for v in silog_full_values if np.isfinite(v)])),
-                    "median": silog_agg["median"],
-                    "p90": silog_agg["p90"],
-                },
-            },
-            "geometric_metrics": {
-                "normal_consistency": {
-                    "mean_angle": normal_agg["mean_angle"],
-                    "median_angle": normal_agg["median_angle"],
-                    "percent_below_11_25": normal_agg["percent_below_11_25"],
-                    "percent_below_22_5": normal_agg["percent_below_22_5"],
-                    "percent_below_30": normal_agg["percent_below_30"],
-                },
-                "depth_edge_f1": {
-                    "precision": edge_f1_agg["precision"],
-                    "recall": edge_f1_agg["recall"],
-                    "f1": edge_f1_agg["f1"],
-                },
-            },
-            "dataset_info": {
-                "num_pairs": num_samples,
-                "gt_name": gt_name,
-                "pred_name": pred_name,
-            },
-        },
+        "depth_raw": depth_raw,
+        "depth_aligned": depth_aligned,
+        # Backward-compatible alias: "depth" refers to aligned depth.
+        "depth": depth_aligned,
         "per_file_metrics": per_file_metrics,
     }
     return results
@@ -507,6 +662,7 @@ def evaluate_rgb_samples(
     Returns:
         Dictionary containing aggregate and per-file metrics.
     """
+
     def _warn_metric_failure(metric_name: str, entry_id: str, exc: Exception) -> None:
         print(f"Warning: Failed to compute {metric_name} for {entry_id}: {exc}")
 
@@ -569,8 +725,7 @@ def evaluate_rgb_samples(
         if img_gt.shape[:2] != img_pred.shape[:2]:
             if not logged_alignment:
                 print(
-                    f"  Aligning GT {img_gt.shape[:2]} -> "
-                    f"pred {img_pred.shape[:2]}"
+                    f"  Aligning GT {img_gt.shape[:2]} -> " f"pred {img_pred.shape[:2]}"
                 )
                 logged_alignment = True
             img_gt = align_to_prediction(img_gt, img_pred)
@@ -611,30 +766,39 @@ def evaluate_rgb_samples(
         )
         if lpips_metric is not None:
             lpips_values.append(
-                _safe_compute("lpips", entry_id, lpips_metric.compute, pred_masked, gt_masked)
+                _safe_compute(
+                    "lpips", entry_id, lpips_metric.compute, pred_masked, gt_masked
+                )
             )
         else:
             lpips_values.append(None)
 
         # Edge F1
         edge_f1_results.append(
-            _safe_compute("edge_f1", entry_id, compute_rgb_edge_f1, pred_masked, gt_masked)
+            _safe_compute(
+                "edge_f1", entry_id, compute_rgb_edge_f1, pred_masked, gt_masked
+            )
         )
 
         # Tail errors
         tail_error_arrays.append(
             _safe_compute(
-                "tail_errors", entry_id,
+                "tail_errors",
+                entry_id,
                 lambda pred, gt: np.abs(pred - gt).mean(axis=-1),
-                pred_masked, gt_masked,
+                pred_masked,
+                gt_masked,
             )
         )
 
         # High-frequency energy
         high_freq_results.append(
             _safe_compute(
-                "high_frequency", entry_id,
-                compute_high_freq_energy_comparison, pred_masked, gt_masked,
+                "high_frequency",
+                entry_id,
+                compute_high_freq_energy_comparison,
+                pred_masked,
+                gt_masked,
             )
         )
 
@@ -673,16 +837,18 @@ def evaluate_rgb_samples(
 
     tail_valid = [r for r in tail_error_arrays if r is not None]
     tail_agg = (
-        aggregate_tail_errors(tail_valid)
-        if tail_valid
-        else {"p95": None, "p99": None}
+        aggregate_tail_errors(tail_valid) if tail_valid else {"p95": None, "p99": None}
     )
 
     high_freq_valid = [r for r in high_freq_results if r is not None]
     high_freq_agg = (
         aggregate_high_freq_metrics(high_freq_valid)
         if high_freq_valid
-        else {"pred_hf_ratio_mean": None, "gt_hf_ratio_mean": None, "relative_diff_mean": None}
+        else {
+            "pred_hf_ratio_mean": None,
+            "gt_hf_ratio_mean": None,
+            "relative_diff_mean": None,
+        }
     )
 
     # Post-processing sanity checks
@@ -732,13 +898,23 @@ def evaluate_rgb_samples(
                 "f1": _none_if_nan(edge_f1["f1"]) if edge_f1 else None,
             },
             "tail_errors": {
-                "p95": float(np.percentile(tail_arr, 95)) if tail_arr is not None and len(tail_arr) > 0 else None,
-                "p99": float(np.percentile(tail_arr, 99)) if tail_arr is not None and len(tail_arr) > 0 else None,
+                "p95": float(np.percentile(tail_arr, 95))
+                if tail_arr is not None and len(tail_arr) > 0
+                else None,
+                "p99": float(np.percentile(tail_arr, 99))
+                if tail_arr is not None and len(tail_arr) > 0
+                else None,
             },
             "high_frequency": {
-                "pred_hf_ratio": _none_if_nan(high_freq["pred_hf_ratio"]) if high_freq else None,
-                "gt_hf_ratio": _none_if_nan(high_freq["gt_hf_ratio"]) if high_freq else None,
-                "relative_diff": _none_if_nan(high_freq["relative_diff"]) if high_freq else None,
+                "pred_hf_ratio": _none_if_nan(high_freq["pred_hf_ratio"])
+                if high_freq
+                else None,
+                "gt_hf_ratio": _none_if_nan(high_freq["gt_hf_ratio"])
+                if high_freq
+                else None,
+                "relative_diff": _none_if_nan(high_freq["relative_diff"])
+                if high_freq
+                else None,
             },
         }
 
@@ -747,7 +923,9 @@ def evaluate_rgb_samples(
             rgb_metrics["depth_binned_photometric"] = db
 
         set_value(
-            per_file_metrics, hierarchy, eid,
+            per_file_metrics,
+            hierarchy,
+            eid,
             {"id": eid, "metrics": {"rgb": rgb_metrics}},
         )
 

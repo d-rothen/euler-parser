@@ -8,6 +8,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 import torch
 
@@ -67,6 +68,26 @@ def print_device_info(requested_device: str, resolved_device: str) -> None:
             print(f"GPU: {torch.cuda.get_device_name(idx)}")
         except Exception:
             pass
+
+
+def resolve_depth_alignment(depth_alignment: str, sns: Optional[bool]) -> str:
+    """Resolve depth alignment mode with deprecated --sns compatibility."""
+    if sns is None:
+        return depth_alignment
+
+    mapped = "auto_affine" if sns else "none"
+    if depth_alignment != "auto_affine":
+        print(
+            "Warning: --sns/--no-sns is ignored because --depth-alignment is set.",
+            file=sys.stderr,
+        )
+        return depth_alignment
+
+    print(
+        "Warning: --sns/--no-sns is deprecated. Use --depth-alignment instead.",
+        file=sys.stderr,
+    )
+    return mapped
 
 
 def validate_gt_config(gt: dict) -> None:
@@ -267,14 +288,21 @@ def main():
         help="Path to metrics_config.json for sanity checking (default: auto-detect)",
     )
     parser.add_argument(
+        "--depth-alignment",
+        type=str,
+        default="auto_affine",
+        choices=["none", "auto_affine", "affine"],
+        help="Depth alignment mode: none, auto_affine (default), or affine",
+    )
+    parser.add_argument(
         "--sns",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Auto-detect and align normalized depth predictions via "
-        "least-squares scale-and-shift (use --no-sns to disable)",
+        default=None,
+        help="Deprecated alias for --depth-alignment auto_affine/none",
     )
 
     args = parser.parse_args()
+    args.depth_alignment = resolve_depth_alignment(args.depth_alignment, args.sns)
 
     # Load and validate config
     try:
@@ -287,6 +315,7 @@ def main():
     args.device = resolve_device(requested_device)
     configure_torch_runtime(args.device)
     print_device_info(requested_device, args.device)
+    print(f"Depth alignment: {args.depth_alignment}")
     print("-" * 60)
 
     # Check sky masking prerequisites
@@ -378,13 +407,15 @@ def main():
                 verbose=args.verbose,
                 sanity_checker=sanity_checker,
                 sky_mask_enabled=args.mask_sky,
-                scale_and_shift=args.sns,
+                alignment_mode=args.depth_alignment,
             )
 
             if sanity_checker is not None:
                 sanity_checker.print_pair_report(ds_name, is_depth=True)
 
-            all_results["depth"] = depth_results.get("depth", {})
+            for depth_key in ("depth", "depth_raw", "depth_aligned"):
+                if depth_key in depth_results:
+                    all_results[depth_key] = depth_results[depth_key]
             all_results.setdefault("per_file_metrics", {}).update(
                 depth_results.get("per_file_metrics", {})
             )

@@ -74,7 +74,8 @@ python main.py <config> [options]
 | `--mask-sky` | flag | off | Mask sky regions from metrics using GT segmentation |
 | `--no-sanity-check` | flag | off | Disable sanity checking of metric configurations |
 | `--metrics-config` | `str` | auto-detect | Path to `metrics_config.json` for sanity checking |
-| `--sns`, `--no-sns` | flag | `--sns` | Enable/disable automatic depth scale-and-shift alignment |
+| `--depth-alignment` | `{none,auto_affine,affine}` | `auto_affine` | Depth alignment mode (`depth` output uses aligned branch) |
+| `--sns`, `--no-sns` | flag | deprecated | Backward-compatible alias for `--depth-alignment auto_affine/none` |
 
 ### Examples
 
@@ -91,8 +92,11 @@ depth-eval config.json --skip-rgb
 # Disable sanity checking
 depth-eval config.json --no-sanity-check
 
-# Disable depth scale-and-shift alignment
-depth-eval config.json --no-sns
+# Disable depth alignment
+depth-eval config.json --depth-alignment none
+
+# Force affine scale+shift alignment on all depth predictions
+depth-eval config.json --depth-alignment affine
 ```
 
 ## Configuration
@@ -239,6 +243,47 @@ Results are saved as JSON per prediction dataset. Default path: `eval.json` insi
 
 ```json
 {
+  "depth_raw": { "...": "metrics without alignment" },
+  "depth_aligned": { "...": "metrics with selected alignment mode" },
+  "depth": {
+    "...": "backward-compatible alias of depth_aligned"
+  },
+  "rgb": {
+    "...": "..."
+  },
+  "per_file_metrics": {
+    "children": {
+      "scene_01": {
+        "children": {
+          "camera_0": {
+            "files": [
+              {
+                "id": "frame_0001",
+                "metrics": {
+                  "depth": { "...": "aligned (alias)" },
+                  "depth_raw": { "...": "raw" },
+                  "depth_aligned": { "...": "aligned" },
+                  "rgb": { "...": "..." }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+For depth outputs:
+- `depth_raw`: metric-space depth without any post-hoc alignment.
+- `depth_aligned`: metric-space depth after configured alignment mode.
+- `depth`: backward-compatible alias of `depth_aligned`.
+
+Previous single-depth structure (kept under `depth`) is:
+
+```json
+{
   "depth": {
     "image_quality": {
       "psnr": 28.5,
@@ -273,49 +318,7 @@ Results are saved as JSON per prediction dataset. Default path: `eval.json` insi
       "pred_name": "model_a"
     }
   },
-  "rgb": {
-    "image_quality": {
-      "psnr": 25.1,
-      "ssim": 0.88,
-      "sce": 0.03,
-      "lpips": 0.12
-    },
-    "edge_f1": {
-      "precision": 0.65,
-      "recall": 0.60,
-      "f1": 0.62
-    },
-    "tail_errors": {
-      "p95": 0.18,
-      "p99": 0.35
-    },
-    "high_frequency": {
-      "pred_hf_ratio": 0.15,
-      "gt_hf_ratio": 0.17,
-      "relative_diff": -0.12
-    },
-    "depth_binned_photometric": {
-      "near":   { "mae": 0.02, "mse": 0.001 },
-      "mid":    { "mae": 0.03, "mse": 0.002 },
-      "far":    { "mae": 0.05, "mse": 0.004 }
-    },
-    "dataset_info": {
-      "num_pairs": 500,
-      "gt_name": "GT",
-      "pred_name": "model_a"
-    }
-  },
-  "per_file_metrics": {
-    "scene_01": {
-      "frame_0001": {
-        "id": "frame_0001",
-        "metrics": {
-          "depth": { "..." : "..." },
-          "rgb":   { "..." : "..." }
-        }
-      }
-    }
-  }
+  "rgb": { "...": "unchanged" }
 }
 ```
 

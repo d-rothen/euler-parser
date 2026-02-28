@@ -224,6 +224,19 @@ class TestGetDepthMetadata:
         assert meta["scale_to_meters"] == 0.01
         assert meta["radial_depth"] is False
 
+    def test_vkitti2_loader_overrides_legacy_scale(self, mock_dataset):
+        ds = mock_dataset(
+            {
+                "gt": {
+                    "meta": {"scale_to_meters": 0.01, "radial_depth": False},
+                    "euler_loading": {"loader": "vkitti2", "function": "depth"},
+                }
+            }
+        )
+        meta = get_depth_metadata(ds)
+        assert meta["scale_to_meters"] == 1.0
+        assert meta["radial_depth"] is False
+
     def test_defaults_when_no_meta(self, mock_dataset):
         ds = mock_dataset({"gt": {"dataset": {}}})
         meta = get_depth_metadata(ds)
