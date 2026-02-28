@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "euler-eval"
-version = "0.6.0"
+version = "1.0.0"
 description = "Depth map evaluation toolkit with comprehensive metrics"
 readme = "README.md"
 requires-python = ">=3.9"
