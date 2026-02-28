@@ -154,6 +154,46 @@ def align_to_prediction(gt: np.ndarray, pred: np.ndarray) -> np.ndarray:
     return result.astype(bool) if is_bool else result
 
 
+def compute_scale_and_shift(
+    pred: np.ndarray,
+    gt: np.ndarray,
+    valid_mask: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, float, float]:
+    """Align predicted depth to GT via least-squares scale and shift.
+
+    Solves ``min_{s,t}  Σ (s·pred + t − gt)²`` over valid pixels and
+    returns the aligned prediction together with the fitted parameters.
+
+    Args:
+        pred: Predicted depth ``(H, W)``.
+        gt: Ground-truth depth in metres ``(H, W)``.
+        valid_mask: Optional ``(H, W)`` bool mask.  When *None*, all
+                    finite positive pixels in both arrays are used.
+
+    Returns:
+        ``(aligned, scale, shift)`` where *aligned* is
+        ``(s·pred + t).astype(float32)`` and *scale*/*shift* are the
+        fitted affine parameters.
+    """
+    if valid_mask is None:
+        valid_mask = (gt > 0) & np.isfinite(gt) & np.isfinite(pred)
+
+    n_valid = int(valid_mask.sum())
+    if n_valid < 2:
+        return pred.copy(), 1.0, 0.0
+
+    pred_valid = pred[valid_mask].astype(np.float64)
+    gt_valid = gt[valid_mask].astype(np.float64)
+
+    # Solve  [pred, 1] @ [s, t]^T = gt
+    A = np.stack([pred_valid, np.ones(n_valid, dtype=np.float64)], axis=-1)
+    params, _, _, _ = np.linalg.lstsq(A, gt_valid, rcond=None)
+    s, t = float(params[0]), float(params[1])
+
+    aligned = (s * pred.astype(np.float64) + t).astype(np.float32)
+    return aligned, s, t
+
+
 # ---------------------------------------------------------------------------
 # Loader resolution helpers
 # ---------------------------------------------------------------------------

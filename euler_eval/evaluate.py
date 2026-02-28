@@ -11,6 +11,7 @@ from euler_loading import MultiModalDataset
 
 from .data import (
     align_to_prediction,
+    compute_scale_and_shift,
     process_depth,
     to_numpy_depth,
     to_numpy_intrinsics,
@@ -172,6 +173,7 @@ def evaluate_depth_samples(
     verbose: bool = False,
     sanity_checker: Optional[SanityChecker] = None,
     sky_mask_enabled: bool = False,
+    scale_and_shift: bool = True,
 ) -> dict:
     """Evaluate all depth metrics from a MultiModalDataset.
 
@@ -212,6 +214,7 @@ def evaluate_depth_samples(
 
     logged_stats = False
     logged_alignment = False
+    do_alignment = False
 
     print("Computing per-image depth metrics...")
     for i in tqdm(range(num_samples), desc="Processing depth pairs"):
@@ -233,8 +236,47 @@ def evaluate_depth_samples(
 
         intrinsics_K = _get_intrinsics_K(sample)
 
+        # Extract sky mask early (needed for both SNS fitting and metrics)
+        sky_valid = None
+        if sky_mask_enabled:
+            sky_valid = _get_sky_mask(sample)
+            if sky_valid is not None and sky_valid.shape[:2] != depth_pred.shape[:2]:
+                sky_valid = align_to_prediction(sky_valid, depth_pred)
+
+        # Detect normalized predictions on first sample
+        if scale_and_shift and i == 0:
+            pred_min = float(np.nanmin(depth_pred))
+            pred_max = float(np.nanmax(depth_pred))
+            if pred_max <= 1.0 + 1e-3 and pred_min >= -1.0 - 1e-3:
+                do_alignment = True
+                print(
+                    f"  Scale-and-shift: detected normalized predictions "
+                    f"(range [{pred_min:.3f}, {pred_max:.3f}])"
+                )
+            else:
+                print(
+                    f"  Scale-and-shift: predictions appear metric "
+                    f"(range [{pred_min:.1f}, {pred_max:.1f}]), "
+                    f"skipping alignment"
+                )
+
+        # Process depth: GT always gets scale/radial conversion;
+        # pred is either processed the same way or aligned via LSQ.
         depth_gt = process_depth(depth_gt, scale_to_meters, is_radial, intrinsics_K)
-        depth_pred = process_depth(depth_pred, scale_to_meters, is_radial, intrinsics_K)
+
+        if do_alignment:
+            fit_mask = (depth_gt > 0) & np.isfinite(depth_gt) & np.isfinite(depth_pred)
+            if sky_valid is not None:
+                fit_mask = fit_mask & sky_valid
+            depth_pred, s, t = compute_scale_and_shift(
+                depth_pred, depth_gt, fit_mask,
+            )
+            if verbose and not logged_stats:
+                print(f"  Fitted scale={s:.4f}, shift={t:.4f}")
+        else:
+            depth_pred = process_depth(
+                depth_pred, scale_to_meters, is_radial, intrinsics_K,
+            )
 
         # Log statistics for first sample
         if verbose and not logged_stats:
@@ -243,16 +285,12 @@ def evaluate_depth_samples(
 
         # Build valid mask (optionally excluding sky)
         valid_mask = None
-        if sky_mask_enabled:
-            sky_valid = _get_sky_mask(sample)
-            if sky_valid is not None:
-                if sky_valid.shape[:2] != depth_pred.shape[:2]:
-                    sky_valid = align_to_prediction(sky_valid, depth_pred)
-                valid_mask = (
-                    (depth_gt > 0) & (depth_pred > 0)
-                    & np.isfinite(depth_gt) & np.isfinite(depth_pred)
-                    & sky_valid
-                )
+        if sky_valid is not None:
+            valid_mask = (
+                (depth_gt > 0) & (depth_pred > 0)
+                & np.isfinite(depth_gt) & np.isfinite(depth_pred)
+                & sky_valid
+            )
 
         all_depths_gt.append(depth_gt)
         all_depths_pred.append(depth_pred)

@@ -221,6 +221,13 @@ def main():
         default=None,
         help="Path to metrics_config.json for sanity checking (default: auto-detect)",
     )
+    parser.add_argument(
+        "--sns",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Auto-detect and align normalized depth predictions via "
+             "least-squares scale-and-shift (use --no-sns to disable)",
+    )
 
     args = parser.parse_args()
 
@@ -323,6 +330,7 @@ def main():
                 verbose=args.verbose,
                 sanity_checker=sanity_checker,
                 sky_mask_enabled=args.mask_sky,
+                scale_and_shift=args.sns,
             )
 
             if sanity_checker is not None:
