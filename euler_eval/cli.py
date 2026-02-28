@@ -9,14 +9,14 @@ import json
 import sys
 from pathlib import Path
 
-from src.data import (
+from .data import (
     build_depth_eval_dataset,
     build_rgb_eval_dataset,
     get_depth_metadata,
     get_rgb_metadata,
 )
-from src.evaluate import evaluate_depth_samples, evaluate_rgb_samples
-from src.sanity_checker import SanityChecker
+from .evaluate import evaluate_depth_samples, evaluate_rgb_samples
+from .sanity_checker import SanityChecker
 
 try:
     import euler_train as _euler_train

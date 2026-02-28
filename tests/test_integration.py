@@ -15,7 +15,7 @@ from PIL import Image
 
 from euler_loading import Modality, MultiModalDataset
 
-from src.data import (
+from euler_eval.data import (
     get_depth_metadata,
     get_rgb_metadata,
     process_depth,
@@ -24,7 +24,7 @@ from src.data import (
     to_numpy_mask,
     to_numpy_rgb,
 )
-from src.evaluate import _extract_hierarchy, _get_intrinsics_K, _get_sky_mask
+from euler_eval.evaluate import _extract_hierarchy, _get_intrinsics_K, _get_sky_mask
 
 
 # ---------------------------------------------------------------------------

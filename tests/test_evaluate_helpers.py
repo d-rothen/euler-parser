@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from src.evaluate import _extract_hierarchy, _get_intrinsics_K, _get_sky_mask
+from euler_eval.evaluate import _extract_hierarchy, _get_intrinsics_K, _get_sky_mask
 
 
 # ---------------------------------------------------------------------------

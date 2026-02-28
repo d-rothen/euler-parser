@@ -1,10 +1,10 @@
-"""Tests for src/data.py -- conversions, metadata resolution, process_depth."""
+"""Tests for euler_eval/data.py -- conversions, metadata resolution, process_depth."""
 
 import numpy as np
 import pytest
 import torch
 
-from src.data import (
+from euler_eval.data import (
     get_depth_metadata,
     get_rgb_metadata,
     process_depth,

@@ -1,7 +1,7 @@
 """Root conftest: patches missing dependencies for the test environment.
 
 The system Python may lack optional/heavy packages (lpips, torchvision).
-This conftest stubs them so the test suite can import src.* modules
+This conftest stubs them so the test suite can import euler_eval.* modules
 without error.
 """
 
@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 
 # ---------------------------------------------------------------------------
-# Stub missing optional packages before any src imports
+# Stub missing optional packages before any euler_eval imports
 # ---------------------------------------------------------------------------
 
 def _stub_missing_package(*names: str) -> None:

@@ -48,7 +48,7 @@ dev = [
 ]
 
 [project.scripts]
-euler-eval = "main:main"
+euler-eval = "euler_eval.cli:main"
 
 [tool.uv.sources]
 ds-crawler = { git = "https://github.com/d-rothen/ds-crawler" }
@@ -57,7 +57,7 @@ euler-train = { git = "https://github.com/d-rothen/euler-train" }
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*"]
+include = ["euler_eval*"]
 
 [tool.black]
 line-length = 88
