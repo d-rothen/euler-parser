@@ -154,6 +154,41 @@ class TestSaveResultsDirectory:
         assert out.exists()
         out.unlink()  # cleanup
 
+    def test_modality_selects_specific_path(self, tmp_path):
+        """When modality is set, save to that modality's path."""
+        depth_dir = tmp_path / "pred_depth"
+        rgb_dir = tmp_path / "pred_rgb"
+        depth_dir.mkdir()
+        rgb_dir.mkdir()
+
+        config = {
+            "name": "model",
+            "depth": {"path": str(depth_dir)},
+            "rgb": {"path": str(rgb_dir)},
+        }
+
+        depth_results = {"depth": {"rmse": 0.5}}
+        rgb_results = {"rgb": {"psnr": 30.0}}
+
+        depth_out = save_results(depth_results, config, modality="depth")
+        rgb_out = save_results(rgb_results, config, modality="rgb")
+
+        assert depth_out == depth_dir / "eval.json"
+        assert rgb_out == rgb_dir / "eval.json"
+        assert json.loads(depth_out.read_text()) == depth_results
+        assert json.loads(rgb_out.read_text()) == rgb_results
+
+    def test_modality_ignored_when_output_file_set(self, tmp_path):
+        """Explicit output_file takes precedence over modality."""
+        out_file = tmp_path / "custom" / "results.json"
+        config = {
+            "name": "model",
+            "depth": {"path": str(tmp_path / "depth")},
+            "output_file": str(out_file),
+        }
+        out = save_results({"depth": {"rmse": 0.5}}, config, modality="depth")
+        assert out == out_file
+
 
 # ---------------------------------------------------------------------------
 # save_results  (zip path)

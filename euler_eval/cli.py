@@ -197,7 +197,9 @@ def _save_json_to_zip(zip_path: Path, internal_name: str, data: dict) -> None:
             zf.writestr(internal_name, json_bytes)
 
 
-def save_results(results: dict, dataset_config: dict) -> Path:
+def save_results(
+    results: dict, dataset_config: dict, modality: str | None = None
+) -> Path:
     """Save results to output file.
 
     Handles both plain directories and zip archives.  When the resolved
@@ -207,17 +209,27 @@ def save_results(results: dict, dataset_config: dict) -> Path:
     Args:
         results: Results dictionary.
         dataset_config: Dataset configuration entry.
+        modality: When set, save to this specific modality's path
+            (e.g. ``"depth"`` or ``"rgb"``).  Falls back to the first
+            available modality path when *None*.
 
     Returns:
         Path where results were saved.
     """
     output_file = dataset_config.get("output_file")
     if output_file is None:
-        # Default: save alongside first available modality path
-        for modality in ("depth", "rgb"):
-            if modality in dataset_config and "path" in dataset_config[modality]:
-                output_file = Path(dataset_config[modality]["path"]) / "eval.json"
-                break
+        if (
+            modality is not None
+            and modality in dataset_config
+            and "path" in dataset_config[modality]
+        ):
+            output_file = Path(dataset_config[modality]["path"]) / "eval.json"
+        else:
+            # Default: save alongside first available modality path
+            for mod in ("depth", "rgb"):
+                if mod in dataset_config and "path" in dataset_config[mod]:
+                    output_file = Path(dataset_config[mod]["path"]) / "eval.json"
+                    break
         if output_file is None:
             output_file = Path("eval.json")
     else:
@@ -389,6 +401,8 @@ def main():
         has_rgb = "rgb" in dataset_config and "path" in dataset_config["rgb"]
 
         all_results = {}
+        depth_save = {}
+        rgb_save = {}
         et_eval_datasets = {}
 
         # Register evaluation as running before work begins
@@ -432,12 +446,17 @@ def main():
             if sanity_checker is not None:
                 sanity_checker.print_pair_report(ds_name, is_depth=True)
 
+            # Build per-modality results for saving
+            depth_save = {}
             for depth_key in ("depth", "depth_raw", "depth_aligned"):
                 if depth_key in depth_results:
+                    depth_save[depth_key] = depth_results[depth_key]
                     all_results[depth_key] = depth_results[depth_key]
-            all_results.setdefault("per_file_metrics", {}).update(
-                depth_results.get("per_file_metrics", {})
-            )
+            depth_pfm = depth_results.get("per_file_metrics", {})
+            if depth_pfm:
+                depth_save["per_file_metrics"] = depth_pfm
+            all_results.setdefault("per_file_metrics", {}).update(depth_pfm)
+
             print_results(
                 {k: v for k, v in depth_results.items() if k != "per_file_metrics"},
                 f"DEPTH: {ds_name}",
@@ -486,19 +505,29 @@ def main():
             if sanity_checker is not None:
                 sanity_checker.print_pair_report(ds_name, is_depth=False)
 
-            all_results["rgb"] = rgb_results.get("rgb", {})
-            all_results.setdefault("per_file_metrics", {}).update(
-                rgb_results.get("per_file_metrics", {})
-            )
+            # Build per-modality results for saving
+            rgb_save = {}
+            rgb_metrics = rgb_results.get("rgb", {})
+            if rgb_metrics:
+                rgb_save["rgb"] = rgb_metrics
+                all_results["rgb"] = rgb_metrics
+            rgb_pfm = rgb_results.get("per_file_metrics", {})
+            if rgb_pfm:
+                rgb_save["per_file_metrics"] = rgb_pfm
+            all_results.setdefault("per_file_metrics", {}).update(rgb_pfm)
+
             print_results(
                 {k: v for k, v in rgb_results.items() if k != "per_file_metrics"},
                 f"RGB: {ds_name}",
             )
 
-        # Save combined results
-        if all_results:
-            output_path = save_results(all_results, dataset_config)
-            print(f"\n  Results saved to: {output_path}")
+        # Save per-modality results to respective dataset paths
+        if depth_save:
+            depth_out = save_results(depth_save, dataset_config, modality="depth")
+            print(f"\n  Depth results saved to: {depth_out}")
+        if rgb_save:
+            rgb_out = save_results(rgb_save, dataset_config, modality="rgb")
+            print(f"\n  RGB results saved to: {rgb_out}")
 
         # Log to euler_train
         if et_run is not None and et_eval_datasets:
