@@ -178,7 +178,7 @@ def compute_rho_a(
     accuracies = np.array(
         [float(np.mean(angular_errors <= t)) for t in thresholds]
     )
-    _trapezoid = getattr(np, "trapezoid", np.trapz)
+    _trapezoid = getattr(np, "trapezoid", None) or getattr(np, "trapz")
     auc = float(_trapezoid(accuracies, thresholds) / threshold_deg)
     return auc
 
