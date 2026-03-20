@@ -191,6 +191,13 @@ def validate_euler_train_config(et_config: dict) -> None:
             "euler_train logging is configured but the 'euler-train' package is not "
             "installed. Install it with: pip install euler-train"
         )
+    unknown = set(et_config) - {"dir"}
+    if unknown:
+        raise ValueError(
+            f"Unknown euler_train config keys: {unknown}. "
+            f"Only 'dir' is supported — pass a project directory for a new run "
+            f"or a run directory (containing meta.json) to resume."
+        )
 
 
 def load_config(config_path: str) -> dict:
@@ -447,11 +454,12 @@ def main():
     # Initialize euler_train logging if configured
     et_config = config.get("euler_train")
     et_run = None
+    et_resuming = False
     if et_config is not None:
+        et_dir = Path(et_config["dir"])
+        et_resuming = (et_dir / "meta.json").is_file()
         et_run = _euler_train.init(
-            dir=et_config["dir"],
-            run_id=et_config.get("run_id"),
-            run_name=et_config.get("run_name"),
+            dir=et_dir,
             mode="eval",
         )
         print(f"euler_train logging enabled -> {et_run.dir}")
@@ -752,7 +760,7 @@ def main():
         print(f"\nSanity check report saved to: {report_path}")
 
     if et_run is not None:
-        if et_config.get("run_id") is not None:
+        if et_resuming:
             et_run.detach()
             print(f"\neuler_train run detached (run still active): {et_run.run_id}")
         else:

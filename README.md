@@ -107,9 +107,7 @@ Defines GT modalities, prediction datasets to evaluate, and optional euler_train
 ```json
 {
   "euler_train": {
-    "dir": "runs/my_project",
-    "run_id": null,
-    "run_name": null
+    "dir": "runs/my_project"
   },
   "gt": {
     "rgb":          { "path": "/data/gt/rgb" },
@@ -165,11 +163,9 @@ When present, evaluation results are logged to an [euler_train](https://github.c
 
 | Field | Required | Description |
 |---|---|---|
-| `euler_train.dir` | yes | euler_train project directory |
-| `euler_train.run_id` | no | Existing run ID to resume (if `null`, a new run is created) |
-| `euler_train.run_name` | no | Human-readable run label |
+| `euler_train.dir` | yes | Project directory (creates a new run) **or** full path to an existing run directory (resumes it) |
 
-When `run_id` is provided, the run is detached after evaluation (the run remains active for further use). When `run_id` is `null`, a new run is created and finished upon completion.
+euler_train auto-detects whether the path is a run directory by checking for `meta.json`. When resuming an existing run, the run is detached after evaluation (the run remains active for further use). When a new run is created, it is finished upon completion.
 
 ### Loader resolution
 

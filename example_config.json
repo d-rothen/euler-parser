@@ -1,8 +1,6 @@
 {
     "euler_train": {
-        "dir": "runs/my_project",
-        "run_id": null,
-        "run_name": null
+        "dir": "runs/my_project"
     },
     "gt": {
         "rgb": {
