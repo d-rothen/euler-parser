@@ -683,6 +683,7 @@ def evaluate_rgb_samples(
     except Exception as exc:
         print(f"Warning: Failed to initialize LPIPS metric: {exc}")
         lpips_metric = None
+    fid_metric = FIDKIDMetric(device=device)
 
     # Per-image storage
     psnr_values = []
@@ -695,6 +696,8 @@ def evaluate_rgb_samples(
     depth_binned_results = []
     processed_entries = []
     depth_binned_per_entry = []
+    all_imgs_gt = []
+    all_imgs_pred = []
 
     logged_stats = False
     logged_alignment = False
@@ -739,6 +742,8 @@ def evaluate_rgb_samples(
             mask_3c = np.stack([sky_valid] * 3, axis=-1)
             gt_masked = img_gt * mask_3c
             pred_masked = img_pred * mask_3c
+        all_imgs_gt.append(gt_masked)
+        all_imgs_pred.append(pred_masked)
 
         # Basic quality metrics
         psnr_values.append(
@@ -812,6 +817,11 @@ def evaluate_rgb_samples(
         depth_binned_per_entry.append(depth_binned_entry)
 
     # Aggregate
+    print("Computing RGB FID (this may take a while)...")
+    rgb_fid = fid_metric.compute_rgb_fid(
+        all_imgs_gt, all_imgs_pred, batch_size, num_workers
+    )
+
     print("Aggregating RGB results...")
 
     edge_f1_valid = [r for r in edge_f1_results if r is not None]
@@ -921,6 +931,7 @@ def evaluate_rgb_samples(
             "ssim": _safe_mean(ssim_values, "ssim"),
             "sce": _safe_mean(sce_values, "sce"),
             "lpips": _safe_mean(lpips_values, "lpips"),
+            "fid": _none_if_nan(rgb_fid),
         },
         "edge_f1": {
             "precision": _none_if_nan(edge_f1_agg["precision"]),

@@ -5,7 +5,7 @@ A comprehensive evaluation toolkit for comparing predicted depth maps and RGB im
 ## Features
 
 - **Depth metrics**: PSNR, SSIM, LPIPS, FID, KID, AbsRel, RMSE, Scale-Invariant Log Error, Normal Consistency, Depth Edge F1
-- **RGB metrics**: PSNR, SSIM, LPIPS, SCE (Structural Chromatic Error), Edge F1, Tail Errors (p95/p99), High-Frequency Energy Ratio, Depth-Binned Photometric Error
+- **RGB metrics**: PSNR, SSIM, LPIPS, FID, SCE (Structural Chromatic Error), Edge F1, Tail Errors (p95/p99), High-Frequency Energy Ratio, Depth-Binned Photometric Error
 - **Sanity checking**: Automatic validation of metric results against configurable thresholds, with detailed warning reports
 - **Sky masking**: Optional exclusion of sky regions from metrics using GT segmentation
 - **Flexible dataset loading**: Automatic loader resolution via euler_loading and ds-crawler index metadata
@@ -225,6 +225,7 @@ Controls sanity check thresholds. See [metrics_config.json](metrics_config.json)
 | SSIM | `rgb.image_quality.ssim` | Structural Similarity Index |
 | SCE | `rgb.image_quality.sce` | Structural Chromatic Error |
 | LPIPS | `rgb.image_quality.lpips` | Learned Perceptual Image Patch Similarity |
+| FID | `rgb.image_quality.fid` | Fréchet Inception Distance (dataset-level distribution metric) |
 | Edge F1 | `rgb.edge_f1` | Edge preservation precision/recall/F1 |
 | Tail Errors | `rgb.tail_errors` | 95th and 99th percentile per-pixel errors |
 | High-Frequency Energy | `rgb.high_frequency` | HF energy preservation ratio (pred vs GT) and relative difference |

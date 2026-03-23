@@ -27,6 +27,23 @@ def _resolve_device(device: Union[str, torch.device]) -> torch.device:
     return requested
 
 
+def _normalize_depth_to_rgb(depth: np.ndarray) -> np.ndarray:
+    """Convert a depth map into a normalized 3-channel image."""
+    valid_mask = (depth > 0) & np.isfinite(depth)
+    if valid_mask.any():
+        min_val = depth[valid_mask].min()
+        max_val = depth[valid_mask].max()
+        if max_val - min_val > 1e-8:
+            normalized = (depth - min_val) / (max_val - min_val)
+        else:
+            normalized = np.zeros_like(depth)
+    else:
+        normalized = np.zeros_like(depth)
+
+    normalized = np.clip(normalized, 0, 1).astype(np.float32)
+    return np.stack([normalized, normalized, normalized], axis=-1)
+
+
 class DepthDataset(Dataset):
     """Dataset wrapper for depth maps."""
 
@@ -43,23 +60,35 @@ class DepthDataset(Dataset):
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         depth = self.depth_maps[idx]
+        img = _normalize_depth_to_rgb(depth)
 
-        # Normalize depth to [0, 1]
-        valid_mask = (depth > 0) & np.isfinite(depth)
-        if valid_mask.any():
-            min_val = depth[valid_mask].min()
-            max_val = depth[valid_mask].max()
-            if max_val - min_val > 1e-8:
-                normalized = (depth - min_val) / (max_val - min_val)
-            else:
-                normalized = np.zeros_like(depth)
-        else:
-            normalized = np.zeros_like(depth)
+        if self.transform:
+            img = self.transform(img)
 
-        normalized = np.clip(normalized, 0, 1).astype(np.float32)
+        return img
 
-        # Convert to 3-channel image
-        img = np.stack([normalized, normalized, normalized], axis=-1)
+
+class RGBDataset(Dataset):
+    """Dataset wrapper for RGB images."""
+
+    def __init__(
+        self,
+        images: list[np.ndarray],
+        transform: Optional[transforms.Compose] = None,
+    ):
+        self.images = images
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.images)
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        img = np.asarray(self.images[idx], dtype=np.float32)
+        if img.ndim != 3 or img.shape[-1] != 3:
+            raise ValueError(
+                f"Unsupported RGB image shape {img.shape}. Expected (H, W, 3)."
+            )
+        img = np.clip(img, 0, 1).astype(np.float32)
 
         if self.transform:
             img = self.transform(img)
@@ -98,7 +127,7 @@ class FIDKIDMetric:
                 ),
             ]
         )
-        self._cached_pair_key: tuple[int, int, int, int, int, int] | None = None
+        self._cached_pair_key: tuple[int, int, int, int, int, int, str] | None = None
         self._cached_pair_features: tuple[np.ndarray, np.ndarray] | None = None
 
     def _build_dataloader(
@@ -157,12 +186,33 @@ class FIDKIDMetric:
 
         return np.concatenate(features, axis=0)
 
+    def _extract_rgb_features(
+        self,
+        images: list[np.ndarray],
+        batch_size: int = 16,
+        num_workers: int = 4,
+    ) -> np.ndarray:
+        """Extract Inception features from RGB images."""
+        dataset = RGBDataset(images, transform=self.transform)
+        dataloader = self._build_dataloader(dataset, batch_size, num_workers)
+
+        features = []
+
+        with torch.inference_mode():
+            for batch in tqdm(dataloader, desc="Extracting features", leave=False):
+                batch = batch.to(self.device, non_blocking=self._non_blocking)
+                feat = self.model(batch)
+                features.append(feat.cpu().numpy())
+
+        return np.concatenate(features, axis=0)
+
     def _get_feature_pair(
         self,
         depths1: list[np.ndarray],
         depths2: list[np.ndarray],
         batch_size: int,
         num_workers: int,
+        input_kind: str = "depth",
     ) -> tuple[np.ndarray, np.ndarray]:
         """Get feature matrices for a pair of datasets with simple memoization."""
         key = (
@@ -172,12 +222,22 @@ class FIDKIDMetric:
             len(depths2),
             batch_size,
             num_workers,
+            input_kind,
         )
         if self._cached_pair_key == key and self._cached_pair_features is not None:
             return self._cached_pair_features
 
-        features1 = self._extract_features(depths1, batch_size, num_workers)
-        features2 = self._extract_features(depths2, batch_size, num_workers)
+        if input_kind == "depth":
+            extractor = self._extract_features
+        elif input_kind == "rgb":
+            extractor = self._extract_rgb_features
+        else:
+            raise ValueError(
+                f"Unknown input_kind '{input_kind}'. Expected 'depth' or 'rgb'."
+            )
+
+        features1 = extractor(depths1, batch_size, num_workers)
+        features2 = extractor(depths2, batch_size, num_workers)
         self._cached_pair_key = key
         self._cached_pair_features = (features1, features2)
         return features1, features2
@@ -262,6 +322,23 @@ class FIDKIDMetric:
         """Compute FID between two sets of depth maps."""
         features1, features2 = self._get_feature_pair(
             depths1, depths2, batch_size, num_workers
+        )
+        return self._compute_fid_from_features(features1, features2)
+
+    def compute_rgb_fid(
+        self,
+        images1: list[np.ndarray],
+        images2: list[np.ndarray],
+        batch_size: int = 16,
+        num_workers: int = 4,
+    ) -> float:
+        """Compute FID between two sets of RGB images."""
+        features1, features2 = self._get_feature_pair(
+            images1,
+            images2,
+            batch_size,
+            num_workers,
+            input_kind="rgb",
         )
         return self._compute_fid_from_features(features1, features2)
 

@@ -268,6 +268,23 @@ This document describes the metrics as they are actually computed in this reposi
   - No fixed upper bound.
   - Lower is better.
 
+### FID
+
+- Computation:
+  - This is dataset-level only.
+  - RGB images are clipped to `[0, 1]`, resized to `299 x 299`, normalized with ImageNet statistics, and embedded with Inception v3.
+  - If sky masking is enabled, FID is computed on the masked images after sky pixels are zeroed in both GT and prediction.
+  - FID is then computed from the feature means and covariances of the GT and prediction sets.
+- Reported as:
+  - Dataset: a single FID value.
+- Intuition:
+  - Measures whether the distribution of predicted RGB images matches the GT distribution in Inception feature space.
+  - It is a set-level realism/distribution score, not a per-image reconstruction score.
+- Output / range:
+  - Ideally `0`.
+  - No fixed upper bound.
+  - Lower is better.
+
 ### Edge F1
 
 - Computation:
