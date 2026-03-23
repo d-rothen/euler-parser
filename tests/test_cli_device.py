@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import torch
 
 from euler_eval import cli
 from euler_eval.metrics.fid_kid import FIDKIDMetric
@@ -102,3 +103,29 @@ def test_fid_kid_feature_pair_cache_reuses_features(monkeypatch):
     assert len(calls) == 2  # one extraction per side, once
     assert first[0] is second[0]
     assert first[1] is second[1]
+
+
+def test_prepare_rgb_input_preserves_aspect_ratio():
+    metric = FIDKIDMetric.__new__(FIDKIDMetric)
+    metric.inception_input_size = 299
+
+    img = np.zeros((380, 1200, 3), dtype=np.float32)
+    tensor = metric._prepare_rgb_input(img)
+
+    assert tuple(tensor.shape) == (3, 299, 944)
+
+
+def test_pad_collate_centers_variable_width_tensors():
+    metric = FIDKIDMetric.__new__(FIDKIDMetric)
+
+    narrow = torch.ones((3, 299, 400), dtype=torch.float32)
+    wide = torch.full((3, 299, 944), 2.0, dtype=torch.float32)
+
+    batch = metric._pad_collate([narrow, wide])
+
+    assert tuple(batch.shape) == (2, 3, 299, 944)
+    offset = (944 - 400) // 2
+    assert torch.all(batch[0, :, :, :offset] == 0)
+    assert torch.all(batch[0, :, :, offset : offset + 400] == 1)
+    assert torch.all(batch[0, :, :, offset + 400 :] == 0)
+    assert torch.all(batch[1] == 2)

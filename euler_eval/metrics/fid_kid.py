@@ -1,13 +1,13 @@
 """Fréchet Inception Distance (FID) and Kernel Inception Distance (KID) metrics."""
 
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from scipy import linalg
 from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
 from torchvision.models import Inception_V3_Weights, inception_v3
 from tqdm import tqdm
 
@@ -50,7 +50,7 @@ class DepthDataset(Dataset):
     def __init__(
         self,
         depth_maps: list[np.ndarray],
-        transform: Optional[transforms.Compose] = None,
+        transform: Optional[Callable[[np.ndarray], torch.Tensor]] = None,
     ):
         self.depth_maps = depth_maps
         self.transform = transform
@@ -60,12 +60,11 @@ class DepthDataset(Dataset):
 
     def __getitem__(self, idx: int) -> torch.Tensor:
         depth = self.depth_maps[idx]
-        img = _normalize_depth_to_rgb(depth)
-
         if self.transform:
-            img = self.transform(img)
+            return self.transform(depth)
 
-        return img
+        img = _normalize_depth_to_rgb(depth)
+        return torch.from_numpy(np.ascontiguousarray(img)).permute(2, 0, 1).float()
 
 
 class RGBDataset(Dataset):
@@ -74,7 +73,7 @@ class RGBDataset(Dataset):
     def __init__(
         self,
         images: list[np.ndarray],
-        transform: Optional[transforms.Compose] = None,
+        transform: Optional[Callable[[np.ndarray], torch.Tensor]] = None,
     ):
         self.images = images
         self.transform = transform
@@ -88,12 +87,11 @@ class RGBDataset(Dataset):
             raise ValueError(
                 f"Unsupported RGB image shape {img.shape}. Expected (H, W, 3)."
             )
-        img = np.clip(img, 0, 1).astype(np.float32)
-
         if self.transform:
-            img = self.transform(img)
+            return self.transform(img)
 
-        return img
+        img = np.clip(img, 0, 1).astype(np.float32)
+        return torch.from_numpy(np.ascontiguousarray(img)).permute(2, 0, 1).float()
 
 
 class FIDKIDMetric:
@@ -117,16 +115,13 @@ class FIDKIDMetric:
         self.model = self.model.to(self.device)
         self.model.eval()
 
-        # Transform for Inception v3
-        self.transform = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Resize((299, 299), antialias=True),
-                transforms.Normalize(
-                    mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-                ),
-            ]
-        )
+        self.inception_input_size = 299
+        self._imagenet_mean = torch.tensor(
+            [0.485, 0.456, 0.406], dtype=torch.float32
+        ).view(1, 3, 1, 1)
+        self._imagenet_std = torch.tensor(
+            [0.229, 0.224, 0.225], dtype=torch.float32
+        ).view(1, 3, 1, 1)
         self._cached_pair_key: tuple[int, int, int, int, int, int, str] | None = None
         self._cached_pair_features: tuple[np.ndarray, np.ndarray] | None = None
 
@@ -135,6 +130,7 @@ class FIDKIDMetric:
         dataset: Dataset,
         batch_size: int,
         num_workers: int,
+        collate_fn: Optional[Callable[[list[torch.Tensor]], torch.Tensor]] = None,
     ) -> DataLoader:
         """Create a DataLoader tuned for the active device."""
         kwargs: dict[str, object] = {
@@ -143,6 +139,8 @@ class FIDKIDMetric:
             "num_workers": num_workers,
             "pin_memory": self.device.type == "cuda",
         }
+        if collate_fn is not None:
+            kwargs["collate_fn"] = collate_fn
 
         if num_workers > 0:
             kwargs["persistent_workers"] = True
@@ -156,6 +154,87 @@ class FIDKIDMetric:
         except TypeError:
             kwargs.pop("pin_memory_device", None)
             return DataLoader(dataset, **kwargs)
+
+    def _normalize_batch(self, batch: torch.Tensor) -> torch.Tensor:
+        """Apply ImageNet normalization to a batched tensor."""
+        mean = self._imagenet_mean.to(device=batch.device, dtype=batch.dtype)
+        std = self._imagenet_std.to(device=batch.device, dtype=batch.dtype)
+        return (batch - mean) / std
+
+    def _resize_tensor(
+        self,
+        tensor: torch.Tensor,
+        preserve_aspect: bool,
+    ) -> torch.Tensor:
+        """Resize a CHW tensor for Inception feature extraction."""
+        if preserve_aspect:
+            height, width = tensor.shape[-2:]
+            short_side = min(height, width)
+            if short_side <= 0:
+                raise ValueError(
+                    f"Invalid input shape {(height, width)} for FID preprocessing."
+                )
+            scale = self.inception_input_size / float(short_side)
+            target_h = max(1, int(round(height * scale)))
+            target_w = max(1, int(round(width * scale)))
+        else:
+            target_h = self.inception_input_size
+            target_w = self.inception_input_size
+
+        batch = tensor.unsqueeze(0)
+        try:
+            resized = F.interpolate(
+                batch,
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+                antialias=True,
+            )
+        except TypeError:
+            resized = F.interpolate(
+                batch,
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+            )
+        return resized.squeeze(0)
+
+    def _prepare_depth_input(self, depth: np.ndarray) -> torch.Tensor:
+        """Convert a depth map into a resized tensor for Inception."""
+        img = _normalize_depth_to_rgb(depth)
+        tensor = torch.from_numpy(np.ascontiguousarray(img)).permute(2, 0, 1).float()
+        return self._resize_tensor(tensor, preserve_aspect=False)
+
+    def _prepare_rgb_input(self, img: np.ndarray) -> torch.Tensor:
+        """Convert an RGB image into an aspect-preserving tensor for Inception."""
+        img = np.asarray(img, dtype=np.float32)
+        if img.ndim != 3 or img.shape[-1] != 3:
+            raise ValueError(
+                f"Unsupported RGB image shape {img.shape}. Expected (H, W, 3)."
+            )
+        img = np.clip(img, 0, 1).astype(np.float32)
+        tensor = torch.from_numpy(np.ascontiguousarray(img)).permute(2, 0, 1).float()
+        return self._resize_tensor(tensor, preserve_aspect=True)
+
+    def _pad_collate(self, batch: list[torch.Tensor]) -> torch.Tensor:
+        """Pad variable-sized CHW tensors to the batch maximum size and stack."""
+        if not batch:
+            raise ValueError("Cannot collate an empty batch.")
+
+        channels = batch[0].shape[0]
+        max_h = max(item.shape[-2] for item in batch)
+        max_w = max(item.shape[-1] for item in batch)
+        padded = torch.zeros(
+            (len(batch), channels, max_h, max_w), dtype=batch[0].dtype
+        )
+
+        for index, item in enumerate(batch):
+            _, height, width = item.shape
+            offset_y = (max_h - height) // 2
+            offset_x = (max_w - width) // 2
+            padded[index, :, offset_y : offset_y + height, offset_x : offset_x + width] = item
+
+        return padded
 
     def _extract_features(
         self,
@@ -173,14 +252,17 @@ class FIDKIDMetric:
         Returns:
             Feature array of shape (N, 2048).
         """
-        dataset = DepthDataset(depth_maps, transform=self.transform)
-        dataloader = self._build_dataloader(dataset, batch_size, num_workers)
+        dataset = DepthDataset(depth_maps, transform=self._prepare_depth_input)
+        dataloader = self._build_dataloader(
+            dataset, batch_size, num_workers, collate_fn=self._pad_collate
+        )
 
         features = []
 
         with torch.inference_mode():
             for batch in tqdm(dataloader, desc="Extracting features", leave=False):
                 batch = batch.to(self.device, non_blocking=self._non_blocking)
+                batch = self._normalize_batch(batch)
                 feat = self.model(batch)
                 features.append(feat.cpu().numpy())
 
@@ -193,14 +275,17 @@ class FIDKIDMetric:
         num_workers: int = 4,
     ) -> np.ndarray:
         """Extract Inception features from RGB images."""
-        dataset = RGBDataset(images, transform=self.transform)
-        dataloader = self._build_dataloader(dataset, batch_size, num_workers)
+        dataset = RGBDataset(images, transform=self._prepare_rgb_input)
+        dataloader = self._build_dataloader(
+            dataset, batch_size, num_workers, collate_fn=self._pad_collate
+        )
 
         features = []
 
         with torch.inference_mode():
             for batch in tqdm(dataloader, desc="Extracting features", leave=False):
                 batch = batch.to(self.device, non_blocking=self._non_blocking)
+                batch = self._normalize_batch(batch)
                 feat = self.model(batch)
                 features.append(feat.cpu().numpy())
 
