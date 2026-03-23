@@ -77,3 +77,38 @@ def test_rgb_output_contains_dataset_fid(monkeypatch):
         "clone"
     ]["files"][0]["metrics"]["rgb"]["image_quality"]
     assert calls == [(2, 2, 16, 4)]
+
+
+def test_rgb_clean_fid_backend_bypasses_builtin_metric(monkeypatch):
+    calls = []
+
+    class _BuiltinShouldNotBeUsed:
+        def __init__(self, device="cpu"):
+            raise AssertionError("builtin FID backend should not be initialized")
+
+    def _fake_clean_fid(
+        all_gt,
+        all_pred,
+        *,
+        mode,
+        batch_size,
+        num_workers,
+        device,
+        verbose,
+    ):
+        calls.append((len(all_gt), len(all_pred), mode, batch_size, num_workers, device))
+        return 0.456
+
+    monkeypatch.setattr(eval_mod, "RGBLPIPSMetric", _DummyLPIPS)
+    monkeypatch.setattr(eval_mod, "FIDKIDMetric", _BuiltinShouldNotBeUsed)
+    monkeypatch.setattr(eval_mod, "compute_clean_fid", _fake_clean_fid)
+    monkeypatch.setattr(eval_mod, "tqdm", lambda x, desc=None: x)
+
+    results = eval_mod.evaluate_rgb_samples(
+        dataset=_make_dataset(),
+        device="cpu",
+        fid_backend="clean-fid",
+    )
+
+    assert results["rgb"]["image_quality"]["fid"] == pytest.approx(0.456)
+    assert calls == [(2, 2, "clean", 16, 4, "cpu")]

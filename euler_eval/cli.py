@@ -411,6 +411,13 @@ def main():
         choices=["none", "auto_affine", "affine"],
         help="Depth alignment mode: none, auto_affine (default), or affine",
     )
+    parser.add_argument(
+        "--rgb-fid-backend",
+        type=str,
+        default="builtin",
+        choices=["builtin", "clean-fid"],
+        help="Backend for RGB FID computation: builtin (default) or clean-fid",
+    )
 
     args = parser.parse_args()
 
@@ -426,6 +433,7 @@ def main():
     configure_torch_runtime(args.device)
     print_device_info(requested_device, args.device)
     print(f"Depth alignment: {args.depth_alignment}")
+    print(f"RGB FID backend: {args.rgb_fid_backend}")
     print("-" * 60)
 
     # Check sky masking prerequisites
@@ -619,6 +627,7 @@ def main():
                 verbose=args.verbose,
                 sanity_checker=sanity_checker,
                 sky_mask_enabled=args.mask_sky,
+                fid_backend=args.rgb_fid_backend,
             )
 
             if sanity_checker is not None:

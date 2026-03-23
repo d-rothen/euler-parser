@@ -1,11 +1,13 @@
 """Fréchet Inception Distance (FID) and Kernel Inception Distance (KID) metrics."""
 
+import tempfile
 from typing import Callable, Optional, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from PIL import Image
 from scipy import linalg
 from torch.utils.data import DataLoader, Dataset
 from torchvision.models import Inception_V3_Weights, inception_v3
@@ -42,6 +44,66 @@ def _normalize_depth_to_rgb(depth: np.ndarray) -> np.ndarray:
 
     normalized = np.clip(normalized, 0, 1).astype(np.float32)
     return np.stack([normalized, normalized, normalized], axis=-1)
+
+
+def _to_uint8_rgb(img: np.ndarray) -> np.ndarray:
+    """Convert an RGB float image in [0, 1] to uint8 for file-based FID tools."""
+    arr = np.asarray(img, dtype=np.float32)
+    if arr.ndim != 3 or arr.shape[-1] != 3:
+        raise ValueError(
+            f"Unsupported RGB image shape {arr.shape}. Expected (H, W, 3)."
+        )
+    arr = np.clip(arr, 0.0, 1.0)
+    return np.rint(arr * 255.0).astype(np.uint8)
+
+
+def _write_rgb_image_folder(images: list[np.ndarray], folder: str) -> None:
+    """Write a list of RGB images to a folder as lossless PNG files."""
+    for index, image in enumerate(images):
+        path = f"{folder}/{index:06d}.png"
+        Image.fromarray(_to_uint8_rgb(image), mode="RGB").save(path, format="PNG")
+
+
+def compute_clean_fid(
+    images1: list[np.ndarray],
+    images2: list[np.ndarray],
+    *,
+    mode: str = "clean",
+    batch_size: int = 32,
+    num_workers: int = 12,
+    device: Union[str, torch.device] = "cuda",
+    verbose: bool = False,
+) -> float:
+    """Compute RGB FID via the official clean-fid implementation.
+
+    Images are written to temporary PNG folders so clean-fid can apply its
+    own quantization and resizing pipeline.
+    """
+    try:
+        from cleanfid import fid as clean_fid
+    except ImportError as exc:
+        raise ImportError(
+            "clean-fid backend requested, but the 'clean-fid' package is not "
+            "installed. Install it with `pip install clean-fid`."
+        ) from exc
+
+    runtime_device = _resolve_device(device)
+
+    with tempfile.TemporaryDirectory(prefix="euler_eval_cleanfid_gt_") as gt_dir:
+        with tempfile.TemporaryDirectory(prefix="euler_eval_cleanfid_pred_") as pred_dir:
+            _write_rgb_image_folder(images1, gt_dir)
+            _write_rgb_image_folder(images2, pred_dir)
+            return float(
+                clean_fid.compute_fid(
+                    gt_dir,
+                    pred_dir,
+                    mode=mode,
+                    batch_size=batch_size,
+                    num_workers=num_workers,
+                    device=runtime_device,
+                    verbose=verbose,
+                )
+            )
 
 
 class DepthDataset(Dataset):

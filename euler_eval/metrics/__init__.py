@@ -24,6 +24,7 @@ from .psnr import compute_psnr
 from .ssim import compute_ssim
 from .lpips_metric import compute_lpips, LPIPSMetric
 from .fid_kid import compute_fid, compute_kid, FIDKIDMetric
+from .fid_kid import compute_clean_fid
 from .absrel import compute_absrel, aggregate_absrel
 from .rmse import compute_rmse, compute_rmse_per_pixel, aggregate_rmse
 from .scale_invariant_log import (
@@ -95,6 +96,7 @@ __all__ = [
     "LPIPSMetric",
     "compute_fid",
     "compute_kid",
+    "compute_clean_fid",
     "FIDKIDMetric",
     # Depth-specific metrics
     "compute_absrel",

@@ -272,8 +272,12 @@ This document describes the metrics as they are actually computed in this reposi
 
 - Computation:
   - This is dataset-level only.
-  - RGB images are clipped to `[0, 1]`, resized so that the shorter side becomes `299` while preserving aspect ratio, then symmetrically padded within each batch to a common size.
-  - The padded tensors are normalized with ImageNet statistics and embedded with Inception v3.
+  - The evaluator supports two backends.
+  - `builtin`:
+    - RGB images are clipped to `[0, 1]`, resized so that the shorter side becomes `299` while preserving aspect ratio, then symmetrically padded within each batch to a common size.
+    - The padded tensors are normalized with ImageNet statistics and embedded with Inception v3.
+  - `clean-fid`:
+    - RGB images are written to temporary PNG files and delegated to the official `clean-fid` implementation, which applies its own image loading, quantization, and resizing pipeline.
   - If sky masking is enabled, FID is computed on the masked images after sky pixels are zeroed in both GT and prediction.
   - FID is then computed from the feature means and covariances of the GT and prediction sets.
 - Reported as:

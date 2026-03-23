@@ -21,6 +21,9 @@ uv pip install "euler-eval @ git+https://github.com/d-rothen/euler-parser.git"
 
 # with euler_train logging support
 uv pip install "euler-eval[logging] @ git+https://github.com/d-rothen/euler-parser.git"
+
+# with clean-fid RGB FID backend support
+uv pip install "euler-eval[fid] @ git+https://github.com/d-rothen/euler-parser.git"
 ```
 
 Or install in editable mode:
@@ -75,6 +78,7 @@ python main.py <config> [options]
 | `--no-sanity-check` | flag | off | Disable sanity checking of metric configurations |
 | `--metrics-config` | `str` | auto-detect | Path to `metrics_config.json` for sanity checking |
 | `--depth-alignment` | `{none,auto_affine,affine}` | `auto_affine` | Depth alignment mode (`depth` output uses aligned branch) |
+| `--rgb-fid-backend` | `{builtin,clean-fid}` | `builtin` | RGB FID backend; `clean-fid` requires optional dependency |
 
 ### Examples
 
@@ -96,6 +100,9 @@ depth-eval config.json --depth-alignment none
 
 # Force affine scale+shift alignment on all depth predictions
 depth-eval config.json --depth-alignment affine
+
+# Use clean-fid for RGB FID computation
+depth-eval config.json --rgb-fid-backend clean-fid
 ```
 
 ## Configuration
@@ -234,6 +241,10 @@ Controls sanity check thresholds. See [metrics_config.json](metrics_config.json)
 ## Output
 
 Results are saved as JSON per prediction dataset. Default path: `eval.json` inside the first available modality path of the dataset, unless overridden by `output_file` in the config.
+
+For RGB FID, two backends are available:
+- `builtin`: in-process Inception-based implementation in this repository.
+- `clean-fid`: delegates folder-vs-folder FID computation to [clean-fid](https://github.com/GaParmar/clean-fid). This backend requires installing the optional `fid` extra and is recommended when you need scores closer to standard published FID numbers.
 
 ### Output structure
 

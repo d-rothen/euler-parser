@@ -45,6 +45,7 @@ from .metrics import (
     compute_rgb_psnr,
     compute_rgb_ssim,
     RGBLPIPSMetric,
+    compute_clean_fid,
     compute_sce,
     compute_depth_binned_photometric_error,
     aggregate_depth_binned_errors,
@@ -625,6 +626,7 @@ def evaluate_rgb_samples(
     verbose: bool = False,
     sanity_checker: Optional[SanityChecker] = None,
     sky_mask_enabled: bool = False,
+    fid_backend: str = "builtin",
 ) -> dict:
     """Evaluate all RGB metrics from a MultiModalDataset.
 
@@ -644,6 +646,7 @@ def evaluate_rgb_samples(
         verbose: Enable verbose output.
         sanity_checker: Optional SanityChecker.
         sky_mask_enabled: If True, use segmentation for sky masking.
+        fid_backend: RGB FID backend. One of ``"builtin"`` or ``"clean-fid"``.
 
     Returns:
         Dictionary containing aggregate and per-file metrics.
@@ -675,6 +678,13 @@ def evaluate_rgb_samples(
     if num_samples == 0:
         raise ValueError("Dataset has no matched samples")
 
+    valid_fid_backends = {"builtin", "clean-fid"}
+    if fid_backend not in valid_fid_backends:
+        raise ValueError(
+            f"Invalid fid_backend '{fid_backend}'. "
+            f"Expected one of {sorted(valid_fid_backends)}."
+        )
+
     has_depth = "gt_depth" in dataset.modality_paths() and depth_meta is not None
 
     print(f"Initializing RGB metrics (device: {device})...")
@@ -683,7 +693,7 @@ def evaluate_rgb_samples(
     except Exception as exc:
         print(f"Warning: Failed to initialize LPIPS metric: {exc}")
         lpips_metric = None
-    fid_metric = FIDKIDMetric(device=device)
+    fid_metric = FIDKIDMetric(device=device) if fid_backend == "builtin" else None
 
     # Per-image storage
     psnr_values = []
@@ -817,10 +827,21 @@ def evaluate_rgb_samples(
         depth_binned_per_entry.append(depth_binned_entry)
 
     # Aggregate
-    print("Computing RGB FID (this may take a while)...")
-    rgb_fid = fid_metric.compute_rgb_fid(
-        all_imgs_gt, all_imgs_pred, batch_size, num_workers
-    )
+    print(f"Computing RGB FID using backend: {fid_backend}...")
+    if fid_backend == "builtin":
+        rgb_fid = fid_metric.compute_rgb_fid(
+            all_imgs_gt, all_imgs_pred, batch_size, num_workers
+        )
+    else:
+        rgb_fid = compute_clean_fid(
+            all_imgs_gt,
+            all_imgs_pred,
+            mode="clean",
+            batch_size=batch_size,
+            num_workers=num_workers,
+            device=device,
+            verbose=verbose,
+        )
 
     print("Aggregating RGB results...")
 
