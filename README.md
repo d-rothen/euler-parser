@@ -52,11 +52,32 @@ The package provides a `depth-eval` console script:
 depth-eval <config> [options]
 ```
 
+It also provides a cache warmup helper for offline environments:
+
+```bash
+euler-eval.init
+```
+
 Or run directly:
 
 ```bash
 python main.py <config> [options]
 ```
+
+Before running on offline compute nodes, you can warm caches on a machine with network access:
+
+```bash
+HF_HOME=/shared/cache/hf \
+TORCH_HOME=/shared/cache/hf/torch \
+CLEANFID_CACHE_DIR=/shared/cache/clean-fid \
+euler-eval.init
+```
+
+This pre-downloads:
+- torchvision AlexNet weights
+- torchvision Inception v3 weights
+- LPIPS AlexNet weights
+- the clean-fid inception checkpoint, if `clean-fid` is installed
 
 ### Positional arguments
 
