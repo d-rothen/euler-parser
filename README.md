@@ -246,6 +246,11 @@ For RGB FID, two backends are available:
 - `builtin`: in-process Inception-based implementation in this repository.
 - `clean-fid`: delegates folder-vs-folder FID computation to [clean-fid](https://github.com/GaParmar/clean-fid). This backend requires installing the optional `fid` extra and is recommended when you need scores closer to standard published FID numbers.
 
+When `--rgb-fid-backend clean-fid` is used, `euler-eval` will honor `CLEANFID_CACHE_DIR` if set:
+- If `CLEANFID_CACHE_DIR/inception-2015-12-05.pt` exists, it is staged into the location `clean-fid` expects before evaluation.
+- If it does not exist and the machine is online, `euler-eval` asks `clean-fid` to download it into `CLEANFID_CACHE_DIR`.
+- Without `CLEANFID_CACHE_DIR`, `clean-fid` falls back to its own default local path handling.
+
 ### Output structure
 
 ```json

@@ -1,5 +1,9 @@
 """Fréchet Inception Distance (FID) and Kernel Inception Distance (KID) metrics."""
 
+import os
+import platform
+from pathlib import Path
+import shutil
 import tempfile
 from typing import Callable, Optional, Union
 
@@ -64,6 +68,44 @@ def _write_rgb_image_folder(images: list[np.ndarray], folder: str) -> None:
         Image.fromarray(_to_uint8_rgb(image), mode="RGB").save(path, format="PNG")
 
 
+def _get_clean_fid_model_target_dir() -> Path:
+    """Return the directory where clean-fid expects its inception checkpoint."""
+    return Path("./") if platform.system() == "Windows" else Path("/tmp")
+
+
+def _prepare_clean_fid_inception_cache(clean_downloads) -> None:
+    """Stage the clean-fid inception checkpoint from CLEANFID_CACHE_DIR if set."""
+    cache_dir_value = os.environ.get("CLEANFID_CACHE_DIR")
+    if not cache_dir_value:
+        return
+
+    cache_dir = Path(cache_dir_value)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        source_path = Path(clean_downloads.check_download_inception(str(cache_dir)))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to prepare clean-fid inception weights in "
+            f"CLEANFID_CACHE_DIR={cache_dir_value!r}. Ensure "
+            f"'inception-2015-12-05.pt' is present there for offline runs."
+        ) from exc
+
+    target_dir = _get_clean_fid_model_target_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / source_path.name
+
+    if target_path.is_symlink() and not target_path.exists():
+        target_path.unlink()
+    if target_path.exists():
+        return
+
+    try:
+        target_path.symlink_to(source_path)
+    except OSError:
+        shutil.copy2(source_path, target_path)
+
+
 def compute_clean_fid(
     images1: list[np.ndarray],
     images2: list[np.ndarray],
@@ -81,12 +123,14 @@ def compute_clean_fid(
     """
     try:
         from cleanfid import fid as clean_fid
+        from cleanfid import downloads_helper as clean_downloads
     except ImportError as exc:
         raise ImportError(
             "clean-fid backend requested, but the 'clean-fid' package is not "
             "installed. Install it with `pip install clean-fid`."
         ) from exc
 
+    _prepare_clean_fid_inception_cache(clean_downloads)
     runtime_device = _resolve_device(device)
 
     with tempfile.TemporaryDirectory(prefix="euler_eval_cleanfid_gt_") as gt_dir:

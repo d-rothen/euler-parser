@@ -1,9 +1,12 @@
 """Tests for RGB output structure with dataset-level FID."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 import euler_eval.evaluate as eval_mod
+import euler_eval.metrics.fid_kid as fid_mod
 
 
 class _DummyRGBDataset:
@@ -112,3 +115,26 @@ def test_rgb_clean_fid_backend_bypasses_builtin_metric(monkeypatch):
 
     assert results["rgb"]["image_quality"]["fid"] == pytest.approx(0.456)
     assert calls == [(2, 2, "clean", 16, 4, "cpu")]
+
+
+def test_prepare_clean_fid_inception_cache_uses_env_location(monkeypatch, tmp_path):
+    cache_dir = tmp_path / "cleanfid-cache"
+    target_dir = tmp_path / "target"
+    model_path = cache_dir / "inception-2015-12-05.pt"
+
+    class _DummyDownloads:
+        @staticmethod
+        def check_download_inception(path):
+            cache_path = Path(path)
+            cache_path.mkdir(parents=True, exist_ok=True)
+            model_path.write_bytes(b"dummy-model")
+            return str(model_path)
+
+    monkeypatch.setenv("CLEANFID_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(fid_mod, "_get_clean_fid_model_target_dir", lambda: target_dir)
+
+    fid_mod._prepare_clean_fid_inception_cache(_DummyDownloads)
+
+    staged = target_dir / "inception-2015-12-05.pt"
+    assert staged.exists()
+    assert staged.read_bytes() == b"dummy-model"
