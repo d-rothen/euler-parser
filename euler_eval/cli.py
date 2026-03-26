@@ -481,6 +481,13 @@ def main():
     segmentation_path = (
         gt.get("segmentation", {}).get("path") if args.mask_sky else None
     )
+    gt_depth_split = gt.get("depth", {}).get("split")
+    gt_rgb_split = gt.get("rgb", {}).get("split")
+    gt_rays_split = gt.get("rays", {}).get("split")
+    calibration_split = gt.get("calibration", {}).get("split")
+    segmentation_split = (
+        gt.get("segmentation", {}).get("split") if args.mask_sky else None
+    )
 
     # Evaluate each prediction dataset
     for dataset_config in config["datasets"]:
@@ -503,6 +510,7 @@ def main():
         depth_dataset = None
         if has_depth and not args.skip_depth:
             pred_depth_path = dataset_config["depth"]["path"]
+            pred_depth_split = dataset_config["depth"].get("split")
             print(f"\n[DEPTH] Evaluating: '{ds_name}'")
             print(f"  GT:   {gt_depth_path}")
             print(f"  Pred: {pred_depth_path}")
@@ -512,6 +520,10 @@ def main():
                 pred_depth_path=pred_depth_path,
                 calibration_path=calibration_path,
                 segmentation_path=segmentation_path,
+                gt_depth_split=gt_depth_split,
+                pred_depth_split=pred_depth_split,
+                calibration_split=calibration_split,
+                segmentation_split=segmentation_split,
             )
             et_eval_datasets["depth"] = depth_dataset
 
@@ -593,6 +605,7 @@ def main():
         rgb_dataset = None
         if has_rgb and not args.skip_rgb:
             pred_rgb_path = dataset_config["rgb"]["path"]
+            pred_rgb_split = dataset_config["rgb"].get("split")
             print(f"\n[RGB] Evaluating: '{ds_name}'")
             print(f"  GT:   {gt_rgb_path}")
             print(f"  Pred: {pred_rgb_path}")
@@ -603,6 +616,11 @@ def main():
                 gt_depth_path=gt_depth_path,
                 calibration_path=calibration_path,
                 segmentation_path=segmentation_path,
+                gt_rgb_split=gt_rgb_split,
+                pred_rgb_split=pred_rgb_split,
+                gt_depth_split=gt_depth_split,
+                calibration_split=calibration_split,
+                segmentation_split=segmentation_split,
             )
             et_eval_datasets["rgb"] = rgb_dataset
 
@@ -671,6 +689,7 @@ def main():
         rays_dataset = None
         if has_rays and gt_rays_path and not args.skip_rays:
             pred_rays_path = dataset_config["rays"]["path"]
+            pred_rays_split = dataset_config["rays"].get("split")
             print(f"\n[RAYS] Evaluating: '{ds_name}'")
             print(f"  GT:   {gt_rays_path}")
             print(f"  Pred: {pred_rays_path}")
@@ -679,6 +698,9 @@ def main():
                 gt_rays_path=gt_rays_path,
                 pred_rays_path=pred_rays_path,
                 calibration_path=calibration_path,
+                gt_rays_split=gt_rays_split,
+                pred_rays_split=pred_rays_split,
+                calibration_split=calibration_split,
             )
             et_eval_datasets["rays"] = rays_dataset
 

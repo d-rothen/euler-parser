@@ -4,7 +4,8 @@
     },
     "gt": {
         "rgb": {
-            "path": "/path/to/gt/rgb"
+            "path": "/path/to/gt/rgb",
+            "split": "test"
         },
         "depth": {
             "path": "/path/to/gt/depth"
