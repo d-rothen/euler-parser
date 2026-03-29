@@ -226,6 +226,22 @@ def process_depth(
 # ---------------------------------------------------------------------------
 
 
+def classify_spatial_alignment(
+    gt_h: int, gt_w: int, pred_h: int, pred_w: int
+) -> str:
+    """Classify how ``align_to_prediction`` would align the given shapes.
+
+    Returns one of ``"none"``, ``"vae_crop"``, or ``"resize"``.
+    """
+    if gt_h == pred_h and gt_w == pred_w:
+        return "none"
+    dh = gt_h - pred_h
+    dw = gt_w - pred_w
+    if pred_h % 8 == 0 and pred_w % 8 == 0 and 0 <= dh < 8 and 0 <= dw < 8:
+        return "vae_crop"
+    return "resize"
+
+
 def align_to_prediction(gt: np.ndarray, pred: np.ndarray) -> np.ndarray:
     """Align GT array dimensions to match prediction.
 
@@ -259,10 +275,37 @@ def align_to_prediction(gt: np.ndarray, pred: np.ndarray) -> np.ndarray:
 
     # Fallback: resize GT to match prediction dimensions.
     import cv2
+    import warnings
+
+    # Warn when aspect ratio distortion is significant (>5%).
+    gt_ar = gt_w / gt_h
+    pred_ar = pred_w / pred_h
+    if abs(gt_ar - pred_ar) / max(gt_ar, pred_ar) > 0.05:
+        warnings.warn(
+            f"Significant aspect-ratio mismatch: GT {gt_w}x{gt_h} "
+            f"({gt_ar:.3f}) vs pred {pred_w}x{pred_h} ({pred_ar:.3f}). "
+            f"Metrics may not be directly comparable to native-resolution "
+            f"evaluations.",
+            stacklevel=2,
+        )
 
     is_bool = gt.dtype == bool
+    is_downscale = (pred_h * pred_w) < (gt_h * gt_w)
     src = gt.astype(np.uint8) if is_bool else gt
-    interp = cv2.INTER_NEAREST if src.ndim == 2 else cv2.INTER_LINEAR
+
+    # INTER_AREA properly averages source pixels when down-sampling and avoids
+    # aliasing artefacts that INTER_NEAREST/INTER_LINEAR produce at large
+    # scale ratios.  For up-sampling we keep INTER_NEAREST (depth/masks) or
+    # INTER_LINEAR (RGB) to preserve values / smoothness respectively.
+    if is_bool:
+        interp = cv2.INTER_NEAREST
+    elif is_downscale:
+        interp = cv2.INTER_AREA
+    elif src.ndim == 2:
+        interp = cv2.INTER_NEAREST
+    else:
+        interp = cv2.INTER_LINEAR
+
     result = cv2.resize(src, (pred_w, pred_h), interpolation=interp)
     return result.astype(bool) if is_bool else result
 

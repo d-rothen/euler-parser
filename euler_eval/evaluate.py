@@ -13,6 +13,7 @@ from euler_loading import MultiModalDataset
 
 from .data import (
     align_to_prediction,
+    classify_spatial_alignment,
     compute_scale_and_shift,
     process_depth,
     to_numpy_depth,
@@ -258,6 +259,9 @@ def evaluate_depth_samples(
     logged_alignment = False
     normalized_predictions = False
     alignment_applied = False
+    gt_native_dims: Optional[tuple[int, int]] = None
+    pred_native_dims: Optional[tuple[int, int]] = None
+    spatial_method = "none"
 
     if alignment_mode == "none":
         print("Depth alignment mode: none (raw predictions only)")
@@ -431,6 +435,12 @@ def evaluate_depth_samples(
 
         depth_gt = to_numpy_depth(sample["gt"])
         depth_pred = to_numpy_depth(sample["pred"])
+
+        # Capture native dimensions from the first sample.
+        if i == 0:
+            gt_native_dims = depth_gt.shape[:2]
+            pred_native_dims = depth_pred.shape[:2]
+            spatial_method = classify_spatial_alignment(*gt_native_dims, *pred_native_dims)
 
         # Align GT to prediction dimensions (e.g. VAE multiple-of-8 crop)
         if depth_gt.shape[:2] != depth_pred.shape[:2]:
@@ -606,6 +616,18 @@ def evaluate_depth_samples(
             "mode": alignment_mode,
             "applied": alignment_applied,
         },
+        "spatial_info": {
+            "gt_dimensions": {"height": gt_native_dims[0], "width": gt_native_dims[1]}
+            if gt_native_dims
+            else None,
+            "pred_dimensions": {"height": pred_native_dims[0], "width": pred_native_dims[1]}
+            if pred_native_dims
+            else None,
+            "method": spatial_method,
+            "evaluated_dimensions": {"height": pred_native_dims[0], "width": pred_native_dims[1]}
+            if pred_native_dims
+            else None,
+        },
     }
     return results
 
@@ -711,6 +733,9 @@ def evaluate_rgb_samples(
 
     logged_stats = False
     logged_alignment = False
+    gt_native_dims: Optional[tuple[int, int]] = None
+    pred_native_dims: Optional[tuple[int, int]] = None
+    spatial_method = "none"
 
     print("Computing per-image RGB metrics...")
     for i in tqdm(range(num_samples), desc="Processing RGB pairs"):
@@ -719,6 +744,12 @@ def evaluate_rgb_samples(
 
         img_gt = to_numpy_rgb(sample["gt"])
         img_pred = to_numpy_rgb(sample["pred"])
+
+        # Capture native dimensions from the first sample.
+        if i == 0:
+            gt_native_dims = img_gt.shape[:2]
+            pred_native_dims = img_pred.shape[:2]
+            spatial_method = classify_spatial_alignment(*gt_native_dims, *pred_native_dims)
 
         # Align GT to prediction dimensions (e.g. VAE multiple-of-8 crop)
         if img_gt.shape[:2] != img_pred.shape[:2]:
@@ -985,6 +1016,18 @@ def evaluate_rgb_samples(
             "gt_name": gt_name,
             "pred_name": pred_name,
         },
+        "spatial_info": {
+            "gt_dimensions": {"height": gt_native_dims[0], "width": gt_native_dims[1]}
+            if gt_native_dims
+            else None,
+            "pred_dimensions": {"height": pred_native_dims[0], "width": pred_native_dims[1]}
+            if pred_native_dims
+            else None,
+            "method": spatial_method,
+            "evaluated_dimensions": {"height": pred_native_dims[0], "width": pred_native_dims[1]}
+            if pred_native_dims
+            else None,
+        },
     }
 
 
@@ -1047,6 +1090,9 @@ def evaluate_rays_samples(
 
     logged_stats = False
     logged_alignment = False
+    gt_native_dims: Optional[tuple[int, int]] = None
+    pred_native_dims: Optional[tuple[int, int]] = None
+    spatial_method = "none"
     resolved_domain: Optional[str] = fov_domain
     threshold_deg: Optional[float] = None
 
@@ -1063,6 +1109,12 @@ def evaluate_rays_samples(
 
         dirs_gt = to_numpy_directions(sample["gt"])
         dirs_pred = to_numpy_directions(sample["pred"])
+
+        # Capture native dimensions from the first sample.
+        if i == 0:
+            gt_native_dims = dirs_gt.shape[:2]
+            pred_native_dims = dirs_pred.shape[:2]
+            spatial_method = classify_spatial_alignment(*gt_native_dims, *pred_native_dims)
 
         # Align GT to prediction dimensions if needed
         if dirs_gt.shape[:2] != dirs_pred.shape[:2]:
@@ -1193,5 +1245,17 @@ def evaluate_rays_samples(
             "pred_name": pred_name,
             "fov_domain": resolved_domain,
             "threshold_deg": threshold_deg,
+        },
+        "spatial_info": {
+            "gt_dimensions": {"height": gt_native_dims[0], "width": gt_native_dims[1]}
+            if gt_native_dims
+            else None,
+            "pred_dimensions": {"height": pred_native_dims[0], "width": pred_native_dims[1]}
+            if pred_native_dims
+            else None,
+            "method": spatial_method,
+            "evaluated_dimensions": {"height": pred_native_dims[0], "width": pred_native_dims[1]}
+            if pred_native_dims
+            else None,
         },
     }

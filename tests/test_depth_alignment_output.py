@@ -232,3 +232,21 @@ def test_depth_alignment_none_keeps_raw_and_aligned_equal(monkeypatch):
     aligned = results["depth_aligned"]["depth_metrics"]["absrel"]["median"]
     assert raw == aligned
     assert results["alignment"]["applied"] is False
+
+
+def test_depth_output_contains_spatial_info(monkeypatch):
+    _patch_depth_metrics(monkeypatch)
+
+    results = eval_mod.evaluate_depth_samples(
+        dataset=_make_dataset(),
+        is_radial=True,
+        device="cpu",
+        alignment_mode="none",
+    )
+
+    assert "spatial_info" in results
+    si = results["spatial_info"]
+    assert si["gt_dimensions"] == {"height": 2, "width": 2}
+    assert si["pred_dimensions"] == {"height": 2, "width": 2}
+    assert si["method"] == "none"
+    assert si["evaluated_dimensions"] == {"height": 2, "width": 2}

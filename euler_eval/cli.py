@@ -555,6 +555,7 @@ def main():
             alignment_info = depth_results.get("alignment", {})
             depth_dataset_info = depth_results.get("dataset_info", {})
 
+            depth_spatial = depth_results.get("spatial_info", {})
             depth_save = {
                 "metricSet": {
                     "metricNamespace": "depth.eval",
@@ -567,6 +568,34 @@ def main():
                     },
                 },
                 "dataset_info": depth_dataset_info,
+                "meta": _clean_metric_tree({
+                    "version": _get_version(),
+                    "modality": "depth",
+                    "device": args.device,
+                    "gt": {
+                        "path": gt_depth_path,
+                        "split": gt_depth_split,
+                        "dimensions": depth_spatial.get("gt_dimensions"),
+                    },
+                    "pred": {
+                        "path": pred_depth_path,
+                        "split": pred_depth_split,
+                        "dimensions": depth_spatial.get("pred_dimensions"),
+                    },
+                    "spatial_alignment": {
+                        "method": depth_spatial.get("method", "none"),
+                        "evaluated_dimensions": depth_spatial.get(
+                            "evaluated_dimensions"
+                        ),
+                    },
+                    "modality_params": depth_meta,
+                    "eval_params": {
+                        "sky_masking": args.mask_sky,
+                        "depth_alignment_mode": args.depth_alignment,
+                        "batch_size": args.batch_size,
+                        "num_workers": args.num_workers,
+                    },
+                }),
                 "depth": {
                     "eval": {
                         "raw": _clean_metric_tree(depth_results["depth_raw"]),
@@ -597,7 +626,8 @@ def main():
             all_results.setdefault("per_file_metrics", {}).update(depth_pfm)
 
             print_results(
-                {k: v for k, v in depth_results.items() if k != "per_file_metrics"},
+                {k: v for k, v in depth_results.items()
+                 if k not in ("per_file_metrics", "spatial_info")},
                 f"DEPTH: {ds_name}",
             )
 
@@ -656,6 +686,7 @@ def main():
             # metricNamespace.  We nest metrics under rgb → eval so every
             # flattened path starts with "rgb.eval.".
             rgb_dataset_info = rgb_results.get("dataset_info", {})
+            rgb_spatial = rgb_results.get("spatial_info", {})
 
             rgb_save = {
                 "metricSet": {
@@ -665,6 +696,34 @@ def main():
                     "sourceKind": "computed",
                 },
                 "dataset_info": rgb_dataset_info,
+                "meta": _clean_metric_tree({
+                    "version": _get_version(),
+                    "modality": "rgb",
+                    "device": args.device,
+                    "gt": {
+                        "path": gt_rgb_path,
+                        "split": gt_rgb_split,
+                        "dimensions": rgb_spatial.get("gt_dimensions"),
+                    },
+                    "pred": {
+                        "path": pred_rgb_path,
+                        "split": pred_rgb_split,
+                        "dimensions": rgb_spatial.get("pred_dimensions"),
+                    },
+                    "spatial_alignment": {
+                        "method": rgb_spatial.get("method", "none"),
+                        "evaluated_dimensions": rgb_spatial.get(
+                            "evaluated_dimensions"
+                        ),
+                    },
+                    "modality_params": rgb_meta,
+                    "eval_params": {
+                        "sky_masking": args.mask_sky,
+                        "fid_backend": args.rgb_fid_backend,
+                        "batch_size": args.batch_size,
+                        "num_workers": args.num_workers,
+                    },
+                }),
             }
             rgb_metrics = rgb_results.get("rgb", {})
             if rgb_metrics:
@@ -681,7 +740,8 @@ def main():
             all_results.setdefault("per_file_metrics", {}).update(rgb_pfm)
 
             print_results(
-                {k: v for k, v in rgb_results.items() if k != "per_file_metrics"},
+                {k: v for k, v in rgb_results.items()
+                 if k not in ("per_file_metrics", "spatial_info")},
                 f"RGB: {ds_name}",
             )
 
@@ -721,6 +781,7 @@ def main():
                 sanity_checker.print_pair_report(ds_name, modality="rays")
 
             rays_dataset_info = rays_results.get("dataset_info", {})
+            rays_spatial = rays_results.get("spatial_info", {})
 
             rays_save = {
                 "metricSet": {
@@ -734,6 +795,32 @@ def main():
                     },
                 },
                 "dataset_info": rays_dataset_info,
+                "meta": _clean_metric_tree({
+                    "version": _get_version(),
+                    "modality": "rays",
+                    "device": args.device,
+                    "gt": {
+                        "path": gt_rays_path,
+                        "split": gt_rays_split,
+                        "dimensions": rays_spatial.get("gt_dimensions"),
+                    },
+                    "pred": {
+                        "path": pred_rays_path,
+                        "split": pred_rays_split,
+                        "dimensions": rays_spatial.get("pred_dimensions"),
+                    },
+                    "spatial_alignment": {
+                        "method": rays_spatial.get("method", "none"),
+                        "evaluated_dimensions": rays_spatial.get(
+                            "evaluated_dimensions"
+                        ),
+                    },
+                    "modality_params": {
+                        "fov_domain": rays_dataset_info.get("fov_domain"),
+                        "threshold_deg": rays_dataset_info.get("threshold_deg"),
+                    },
+                    "eval_params": {},
+                }),
             }
             rays_metrics = rays_results.get("rays", {})
             if rays_metrics:
@@ -750,7 +837,8 @@ def main():
             all_results.setdefault("per_file_metrics", {}).update(rays_pfm)
 
             print_results(
-                {k: v for k, v in rays_results.items() if k != "per_file_metrics"},
+                {k: v for k, v in rays_results.items()
+                 if k not in ("per_file_metrics", "spatial_info")},
                 f"RAYS: {ds_name}",
             )
 

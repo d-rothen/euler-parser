@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from euler_eval.data import align_to_prediction, compute_scale_and_shift
+from euler_eval.data import align_to_prediction, classify_spatial_alignment, compute_scale_and_shift
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +102,69 @@ class TestAlignToPredicition:
         pred = np.random.rand(128, 128).astype(np.float32)
         result = align_to_prediction(gt, pred)
         assert result.shape == (128, 128)
+
+    def test_large_downscale_different_aspect_ratio(self):
+        """Typical case: GT 1024x2048 -> pred 370x780 (warped aspect ratio)."""
+        gt = np.random.rand(1024, 2048).astype(np.float32)
+        pred = np.random.rand(370, 780).astype(np.float32)
+        with pytest.warns(UserWarning, match="aspect-ratio mismatch"):
+            result = align_to_prediction(gt, pred)
+        assert result.shape == (370, 780)
+        assert result.dtype == np.float32
+
+    def test_large_downscale_rgb(self):
+        """Large downscale for RGB arrays uses INTER_AREA."""
+        gt = np.random.rand(1024, 2048, 3).astype(np.float32)
+        pred = np.random.rand(370, 780, 3).astype(np.float32)
+        with pytest.warns(UserWarning, match="aspect-ratio mismatch"):
+            result = align_to_prediction(gt, pred)
+        assert result.shape == (370, 780, 3)
+        assert result.dtype == np.float32
+
+    def test_no_warning_when_aspect_ratio_matches(self):
+        """No warning for matching aspect ratios (just different resolution)."""
+        gt = np.random.rand(1024, 2048).astype(np.float32)
+        pred = np.random.rand(512, 1024).astype(np.float32)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            result = align_to_prediction(gt, pred)
+        assert result.shape == (512, 1024)
+
+
+# ---------------------------------------------------------------------------
+# classify_spatial_alignment
+# ---------------------------------------------------------------------------
+
+
+class TestClassifySpatialAlignment:
+    """Tests for alignment method classification."""
+
+    def test_same_dims(self):
+        assert classify_spatial_alignment(64, 128, 64, 128) == "none"
+
+    def test_vae_crop(self):
+        """GT 375x1242 -> pred 368x1240 (multiple-of-8, delta < 8)."""
+        assert classify_spatial_alignment(375, 1242, 368, 1240) == "vae_crop"
+
+    def test_vae_crop_height_only(self):
+        assert classify_spatial_alignment(133, 256, 128, 256) == "vae_crop"
+
+    def test_resize_large_delta(self):
+        """Delta >= 8 -> resize."""
+        assert classify_spatial_alignment(200, 200, 184, 184) == "resize"
+
+    def test_resize_different_aspect(self):
+        """Vastly different dimensions -> resize."""
+        assert classify_spatial_alignment(1024, 2048, 370, 780) == "resize"
+
+    def test_resize_pred_larger(self):
+        """Pred larger than GT (negative delta) -> resize."""
+        assert classify_spatial_alignment(64, 64, 128, 128) == "resize"
+
+    def test_resize_pred_not_mult_8(self):
+        """Pred dims not multiple of 8 -> resize even if delta < 8."""
+        assert classify_spatial_alignment(103, 205, 99, 201) == "resize"
 
 
 # ---------------------------------------------------------------------------
