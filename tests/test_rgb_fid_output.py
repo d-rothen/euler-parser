@@ -90,8 +90,8 @@ def test_rgb_clean_fid_backend_bypasses_builtin_metric(monkeypatch):
             raise AssertionError("builtin FID backend should not be initialized")
 
     def _fake_clean_fid(
-        all_gt,
-        all_pred,
+        gt_dir,
+        pred_dir,
         *,
         mode,
         batch_size,
@@ -99,7 +99,7 @@ def test_rgb_clean_fid_backend_bypasses_builtin_metric(monkeypatch):
         device,
         verbose,
     ):
-        calls.append((len(all_gt), len(all_pred), mode, batch_size, num_workers, device))
+        calls.append((Path(gt_dir).is_dir(), Path(pred_dir).is_dir(), mode, batch_size, num_workers, device))
         return 0.456
 
     monkeypatch.setattr(eval_mod, "RGBLPIPSMetric", _DummyLPIPS)
@@ -114,7 +114,7 @@ def test_rgb_clean_fid_backend_bypasses_builtin_metric(monkeypatch):
     )
 
     assert results["rgb"]["image_quality"]["fid"] == pytest.approx(0.456)
-    assert calls == [(2, 2, "clean", 16, 4, "cpu")]
+    assert calls == [(True, True, "clean", 16, 4, "cpu")]
 
 
 def test_prepare_clean_fid_inception_cache_uses_env_location(monkeypatch, tmp_path):

@@ -4,9 +4,12 @@ Runs all metrics over depth and RGB datasets loaded via euler_loading.
 """
 
 import copy
+import tempfile
+from pathlib import Path
 
 import numpy as np
 from typing import Optional
+from PIL import Image
 from tqdm import tqdm
 
 from euler_loading import MultiModalDataset
@@ -52,7 +55,6 @@ from .metrics import (
     aggregate_depth_binned_errors,
     compute_rgb_edge_f1,
     aggregate_rgb_edge_f1,
-    aggregate_tail_errors,
     compute_high_freq_energy_comparison,
     aggregate_high_freq_metrics,
     # Rays utilities and metrics
@@ -121,6 +123,84 @@ def _log_sample_stats(gt: np.ndarray, pred: np.ndarray, label: str) -> None:
             f"mean={stats['mean']:.4f}"
         )
     print("=" * 77 + "\n")
+
+
+class _StreamingValueStore:
+    """Append-only float store backed by a temporary binary file."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self._file = open(path, "wb")
+        self.count = 0
+        self.total = 0.0
+
+    def append(self, values: np.ndarray) -> None:
+        arr = np.asarray(values, dtype=np.float32).reshape(-1)
+        if arr.size == 0:
+            return
+        arr.tofile(self._file)
+        self.count += int(arr.size)
+        self.total += float(np.sum(arr, dtype=np.float64))
+
+    def mean(self) -> Optional[float]:
+        if self.count == 0:
+            return None
+        return float(self.total / self.count)
+
+    def quantiles(self, probs: list[float]) -> list[float]:
+        if self.count == 0:
+            return [float("nan")] * len(probs)
+
+        self._file.flush()
+        values = np.memmap(
+            self.path,
+            dtype=np.float32,
+            mode="r+",
+            shape=(self.count,),
+        )
+
+        requested_indices = []
+        positions = []
+        for prob in probs:
+            pos = prob * (self.count - 1)
+            lower = int(np.floor(pos))
+            upper = int(np.ceil(pos))
+            positions.append((lower, upper, pos - lower))
+            requested_indices.extend([lower, upper])
+
+        values.partition(sorted(set(requested_indices)))
+
+        result = []
+        for lower, upper, frac in positions:
+            lower_value = float(values[lower])
+            if upper == lower:
+                result.append(lower_value)
+            else:
+                upper_value = float(values[upper])
+                result.append(lower_value + (upper_value - lower_value) * frac)
+
+        del values
+        return result
+
+    def close(self) -> None:
+        if not self._file.closed:
+            self._file.close()
+
+
+def _write_npy_array(folder: str, index: int, array: np.ndarray) -> str:
+    path = f"{folder}/{index:06d}.npy"
+    np.save(path, np.asarray(array))
+    return path
+
+
+def _write_png_image(folder: str, index: int, image: np.ndarray) -> str:
+    path = f"{folder}/{index:06d}.png"
+    rgb = np.clip(np.asarray(image, dtype=np.float32), 0.0, 1.0)
+    Image.fromarray(np.rint(rgb * 255.0).astype(np.uint8), mode="RGB").save(
+        path,
+        format="PNG",
+    )
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -230,45 +310,22 @@ def evaluate_depth_samples(
     lpips_metric = LPIPSMetric(device=device)
     fid_kid_metric = FIDKIDMetric(device=device)
 
-    def _init_metric_store() -> dict:
+    def _init_metric_store(temp_dir: Path, name: str) -> dict:
         return {
             "psnr_values": [],
             "ssim_values": [],
             "lpips_values": [],
-            "absrel_values": [],
-            "rmse_values": [],
-            "silog_values": [],
             "silog_full_values": [],
-            "normal_angle_values": [],
             "edge_f1_results": [],
-            "all_depths_pred": [],
-            "psnr_metadata_list": [],
-            "ssim_metadata_list": [],
-            "absrel_metadata_list": [],
-            "normal_metadata_list": [],
+            "pred_depth_paths": [],
+            "absrel_store": _StreamingValueStore(str(temp_dir / f"{name}_absrel.bin")),
+            "rmse_store": _StreamingValueStore(str(temp_dir / f"{name}_rmse.bin")),
+            "silog_store": _StreamingValueStore(str(temp_dir / f"{name}_silog.bin")),
+            "normal_store": _StreamingValueStore(str(temp_dir / f"{name}_normal.bin")),
+            "normal_below_11_25": 0,
+            "normal_below_22_5": 0,
+            "normal_below_30": 0,
         }
-
-    stores = {
-        "raw": _init_metric_store(),
-        "aligned": _init_metric_store(),
-    }
-    processed_entries = []
-    all_depths_gt = []
-
-    logged_stats = False
-    logged_alignment = False
-    normalized_predictions = False
-    alignment_applied = False
-    gt_native_dims: Optional[tuple[int, int]] = None
-    pred_native_dims: Optional[tuple[int, int]] = None
-    spatial_method = "none"
-
-    if alignment_mode == "none":
-        print("Depth alignment mode: none (raw predictions only)")
-    elif alignment_mode == "auto_affine":
-        print("Depth alignment mode: auto_affine (normalized-depth detection)")
-    else:
-        print("Depth alignment mode: affine (always apply scale-and-shift)")
 
     def _compute_branch_metrics(
         depth_gt: np.ndarray, depth_pred: np.ndarray, valid_mask: Optional[np.ndarray]
@@ -306,21 +363,21 @@ def evaluate_depth_samples(
             "edge_f1": edge_f1,
         }
 
-    def _append_metrics(store: dict, metrics: dict, depth_pred: np.ndarray) -> None:
+    def _append_metrics(store: dict, metrics: dict, pred_depth_path: str) -> None:
         store["psnr_values"].append(metrics["psnr_val"])
         store["ssim_values"].append(metrics["ssim_val"])
         store["lpips_values"].append(metrics["lpips_val"])
-        store["absrel_values"].append(metrics["absrel_arr"])
-        store["rmse_values"].append(metrics["rmse_arr"])
-        store["silog_values"].append(metrics["silog_arr"])
         store["silog_full_values"].append(metrics["silog_full"])
-        store["normal_angle_values"].append(metrics["normal_angles"])
         store["edge_f1_results"].append(metrics["edge_f1"])
-        store["all_depths_pred"].append(depth_pred)
-        store["psnr_metadata_list"].append(metrics["psnr_meta"])
-        store["ssim_metadata_list"].append(metrics["ssim_meta"])
-        store["absrel_metadata_list"].append(metrics["absrel_meta"])
-        store["normal_metadata_list"].append(metrics["normal_meta"])
+        store["pred_depth_paths"].append(pred_depth_path)
+        store["absrel_store"].append(metrics["absrel_arr"])
+        store["rmse_store"].append(np.sqrt(metrics["rmse_arr"]))
+        store["silog_store"].append(metrics["silog_arr"])
+        store["normal_store"].append(metrics["normal_angles"])
+        if len(metrics["normal_angles"]) > 0:
+            store["normal_below_11_25"] += int(np.sum(metrics["normal_angles"] < 11.25))
+            store["normal_below_22_5"] += int(np.sum(metrics["normal_angles"] < 22.5))
+            store["normal_below_30"] += int(np.sum(metrics["normal_angles"] < 30.0))
 
     def _build_valid_mask(
         depth_gt: np.ndarray, depth_pred: np.ndarray, sky_valid: Optional[np.ndarray]
@@ -341,19 +398,31 @@ def evaluate_depth_samples(
             return None
         return float(np.mean(valid))
 
-    def _build_depth_summary(store: dict) -> dict:
-        absrel_agg = aggregate_absrel(store["absrel_values"])
-        rmse_agg = aggregate_rmse(store["rmse_values"])
-        silog_agg = aggregate_silog(store["silog_values"])
-        normal_agg = aggregate_normal_consistency(store["normal_angle_values"])
+    def _build_depth_summary(store: dict, gt_depth_paths: list[str]) -> dict:
+        absrel_median, absrel_p90 = store["absrel_store"].quantiles([0.5, 0.9])
+        rmse_median, rmse_p90 = store["rmse_store"].quantiles([0.5, 0.9])
+        silog_median, silog_p90 = store["silog_store"].quantiles([0.5, 0.9])
+        normal_median = store["normal_store"].quantiles([0.5])[0]
+        normal_count = store["normal_store"].count
         edge_f1_agg = aggregate_edge_f1(store["edge_f1_results"])
 
         fid_value = fid_kid_metric.compute_fid(
-            all_depths_gt, store["all_depths_pred"], batch_size, num_workers
+            gt_depth_paths, store["pred_depth_paths"], batch_size, num_workers
         )
         kid_mean, kid_std = fid_kid_metric.compute_kid(
-            all_depths_gt, store["all_depths_pred"], batch_size, num_workers
+            gt_depth_paths, store["pred_depth_paths"], batch_size, num_workers
         )
+
+        if normal_count > 0:
+            normal_mean = store["normal_store"].mean()
+            pct_11_25 = store["normal_below_11_25"] / normal_count * 100.0
+            pct_22_5 = store["normal_below_22_5"] / normal_count * 100.0
+            pct_30 = store["normal_below_30"] / normal_count * 100.0
+        else:
+            normal_mean = float("nan")
+            pct_11_25 = float("nan")
+            pct_22_5 = float("nan")
+            pct_30 = float("nan")
 
         return {
             "image_quality": {
@@ -365,21 +434,21 @@ def evaluate_depth_samples(
                 "kid_std": kid_std,
             },
             "depth_metrics": {
-                "absrel": {"median": absrel_agg["median"], "p90": absrel_agg["p90"]},
-                "rmse": {"median": rmse_agg["median"], "p90": rmse_agg["p90"]},
+                "absrel": {"median": absrel_median, "p90": absrel_p90},
+                "rmse": {"median": rmse_median, "p90": rmse_p90},
                 "silog": {
                     "mean": _safe_mean(store["silog_full_values"]),
-                    "median": silog_agg["median"],
-                    "p90": silog_agg["p90"],
+                    "median": silog_median,
+                    "p90": silog_p90,
                 },
             },
             "geometric_metrics": {
                 "normal_consistency": {
-                    "mean_angle": normal_agg["mean_angle"],
-                    "median_angle": normal_agg["median_angle"],
-                    "percent_below_11_25": normal_agg["percent_below_11_25"],
-                    "percent_below_22_5": normal_agg["percent_below_22_5"],
-                    "percent_below_30": normal_agg["percent_below_30"],
+                    "mean_angle": normal_mean,
+                    "median_angle": normal_median,
+                    "percent_below_11_25": pct_11_25,
+                    "percent_below_22_5": pct_22_5,
+                    "percent_below_30": pct_30,
                 },
                 "depth_edge_f1": {
                     "precision": edge_f1_agg["precision"],
@@ -389,29 +458,29 @@ def evaluate_depth_samples(
             },
         }
 
-    def _build_per_file_depth_value(store: dict, index: int) -> dict:
-        absrel_arr = store["absrel_values"][index]
-        rmse_arr = store["rmse_values"][index]
-        normal_angles = store["normal_angle_values"][index]
-        edge_f1 = store["edge_f1_results"][index]
+    def _build_per_file_depth_value(metrics: dict) -> dict:
+        absrel_arr = metrics["absrel_arr"]
+        rmse_arr = metrics["rmse_arr"]
+        normal_angles = metrics["normal_angles"]
+        edge_f1 = metrics["edge_f1"]
 
         return {
             "image_quality": {
-                "psnr": float(store["psnr_values"][index])
-                if np.isfinite(store["psnr_values"][index])
+                "psnr": float(metrics["psnr_val"])
+                if np.isfinite(metrics["psnr_val"])
                 else None,
-                "ssim": float(store["ssim_values"][index])
-                if np.isfinite(store["ssim_values"][index])
+                "ssim": float(metrics["ssim_val"])
+                if np.isfinite(metrics["ssim_val"])
                 else None,
-                "lpips": float(store["lpips_values"][index]),
+                "lpips": float(metrics["lpips_val"])
+                if np.isfinite(metrics["lpips_val"])
+                else None,
             },
             "depth_metrics": {
                 "absrel": float(np.mean(absrel_arr)) if len(absrel_arr) > 0 else None,
-                "rmse": float(np.sqrt(np.mean(rmse_arr)))
-                if len(rmse_arr) > 0
-                else None,
-                "silog": float(store["silog_full_values"][index])
-                if np.isfinite(store["silog_full_values"][index])
+                "rmse": float(np.sqrt(np.mean(rmse_arr))) if len(rmse_arr) > 0 else None,
+                "silog": float(metrics["silog_full"])
+                if np.isfinite(metrics["silog_full"])
                 else None,
             },
             "geometric_metrics": {
@@ -428,208 +497,246 @@ def evaluate_depth_samples(
             },
         }
 
-    print("Computing per-image depth metrics...")
-    for i in tqdm(range(num_samples), desc="Processing depth pairs"):
-        sample = dataset[i]
-        hierarchy, entry_id = _extract_hierarchy(sample)
+    logged_stats = False
+    logged_alignment = False
+    normalized_predictions = False
+    alignment_applied = False
+    gt_native_dims: Optional[tuple[int, int]] = None
+    pred_native_dims: Optional[tuple[int, int]] = None
+    spatial_method = "none"
 
-        depth_gt = to_numpy_depth(sample["gt"])
-        depth_pred = to_numpy_depth(sample["pred"])
-
-        # Capture native dimensions from the first sample.
-        if i == 0:
-            gt_native_dims = depth_gt.shape[:2]
-            pred_native_dims = depth_pred.shape[:2]
-            spatial_method = classify_spatial_alignment(*gt_native_dims, *pred_native_dims)
-
-        # Align GT to prediction dimensions (e.g. VAE multiple-of-8 crop)
-        if depth_gt.shape[:2] != depth_pred.shape[:2]:
-            if not logged_alignment:
-                print(
-                    f"  Aligning GT {depth_gt.shape[:2]} -> "
-                    f"pred {depth_pred.shape[:2]}"
-                )
-                logged_alignment = True
-            depth_gt = align_to_prediction(depth_gt, depth_pred)
-
-        intrinsics_K = _get_intrinsics_K(sample)
-
-        # Extract sky mask early (needed for both SNS fitting and metrics)
-        sky_valid = None
-        if sky_mask_enabled:
-            sky_valid = _get_sky_mask(sample)
-            if sky_valid is not None and sky_valid.shape[:2] != depth_pred.shape[:2]:
-                sky_valid = align_to_prediction(sky_valid, depth_pred)
-
-        # Detect normalized predictions on first sample for auto mode.
-        if alignment_mode == "auto_affine" and i == 0:
-            pred_min = float(np.nanmin(depth_pred))
-            pred_max = float(np.nanmax(depth_pred))
-            if pred_max <= 1.0 + 1e-3 and pred_min >= -1.0 - 1e-3:
-                normalized_predictions = True
-                print(
-                    f"  Scale-and-shift: detected normalized predictions "
-                    f"(range [{pred_min:.3f}, {pred_max:.3f}])"
-                )
-            else:
-                print(
-                    f"  Scale-and-shift: predictions appear metric "
-                    f"(range [{pred_min:.1f}, {pred_max:.1f}]), "
-                    f"skipping alignment"
-                )
-
-        # Process depth into metric units for raw branch.
-        depth_gt = process_depth(depth_gt, 1.0, is_radial, intrinsics_K)
-        depth_pred_raw = process_depth(depth_pred, 1.0, is_radial, intrinsics_K)
-
-        # Build aligned branch based on selected mode.
-        if alignment_mode == "none":
-            depth_pred_aligned = depth_pred_raw
-        else:
-            do_alignment = alignment_mode == "affine" or normalized_predictions
-            if do_alignment:
-                # In auto mode, fit on native prediction values when they are
-                # normalized. In affine mode, fit on metric-converted values.
-                fit_source = depth_pred if normalized_predictions else depth_pred_raw
-                fit_mask = (
-                    (depth_gt > 0) & np.isfinite(depth_gt) & np.isfinite(fit_source)
-                )
-                if sky_valid is not None:
-                    fit_mask = fit_mask & sky_valid
-                depth_pred_aligned, s, t = compute_scale_and_shift(
-                    fit_source, depth_gt, fit_mask
-                )
-                alignment_applied = True
-                if verbose and not logged_stats:
-                    print(f"  Fitted scale={s:.4f}, shift={t:.4f}")
-            else:
-                depth_pred_aligned = depth_pred_raw
-
-        # Log statistics for first sample
-        if verbose and not logged_stats:
-            _log_sample_stats(depth_gt, depth_pred_aligned, "DEPTH")
-            logged_stats = True
-
-        all_depths_gt.append(depth_gt)
-        processed_entries.append({"hierarchy": hierarchy, "id": entry_id})
-
-        raw_valid_mask = _build_valid_mask(depth_gt, depth_pred_raw, sky_valid)
-        aligned_valid_mask = _build_valid_mask(depth_gt, depth_pred_aligned, sky_valid)
-
-        raw_metrics = _compute_branch_metrics(depth_gt, depth_pred_raw, raw_valid_mask)
-        _append_metrics(stores["raw"], raw_metrics, depth_pred_raw)
-
-        if depth_pred_aligned is depth_pred_raw:
-            _append_metrics(stores["aligned"], raw_metrics, depth_pred_aligned)
-        else:
-            aligned_metrics = _compute_branch_metrics(
-                depth_gt, depth_pred_aligned, aligned_valid_mask
-            )
-            _append_metrics(stores["aligned"], aligned_metrics, depth_pred_aligned)
-
-        if sanity_checker is not None:
-            sanity_checker.validate_depth_input(depth_gt, depth_pred_aligned, entry_id)
-
-    # Post-processing sanity checks
-    if sanity_checker is not None:
-        print("Running post-processing sanity checks...")
-        for i, entry in enumerate(processed_entries):
-            eid = entry["id"]
-            pm = stores["aligned"]["psnr_metadata_list"][i]
-            if pm["max_val_used"] is not None:
-                sanity_checker.validate_depth_psnr(
-                    stores["aligned"]["psnr_values"][i], pm["max_val_used"], eid
-                )
-            sm = stores["aligned"]["ssim_metadata_list"][i]
-            if sm["depth_range"] is not None:
-                sanity_checker.validate_depth_ssim(
-                    stores["aligned"]["ssim_values"][i], sm["depth_range"], eid
-                )
-            am = stores["aligned"]["absrel_metadata_list"][i]
-            if am["median"] is not None:
-                sanity_checker.validate_depth_absrel(am["median"], am["p90"], eid)
-            if (
-                sm["depth_range"] is not None
-                and len(stores["aligned"]["rmse_values"][i]) > 0
-            ):
-                rmse_val = float(np.sqrt(np.mean(stores["aligned"]["rmse_values"][i])))
-                sanity_checker.validate_depth_rmse(rmse_val, sm["depth_range"], eid)
-            sv = stores["aligned"]["silog_full_values"][i]
-            if np.isfinite(sv):
-                sanity_checker.validate_depth_silog(sv, eid)
-            nm = stores["aligned"]["normal_metadata_list"][i]
-            if nm["mean_angle"] is not None:
-                sanity_checker.validate_normal_consistency(
-                    nm["mean_angle"], nm["valid_pixels_after_erosion"], eid
-                )
-            ef = stores["aligned"]["edge_f1_results"][i]
-            sanity_checker.validate_depth_edge_f1(
-                ef["pred_edge_pixels"],
-                ef["gt_edge_pixels"],
-                ef["total_pixels"],
-                ef["f1"],
-                eid,
-            )
-
-    print("Computing FID/KID (this may take a while)...")
-    print("Aggregating depth results...")
-
-    depth_raw = _build_depth_summary(stores["raw"])
-    if alignment_applied:
-        depth_aligned = _build_depth_summary(stores["aligned"])
+    if alignment_mode == "none":
+        print("Depth alignment mode: none (raw predictions only)")
+    elif alignment_mode == "auto_affine":
+        print("Depth alignment mode: auto_affine (normalized-depth detection)")
     else:
-        depth_aligned = copy.deepcopy(depth_raw)
+        print("Depth alignment mode: affine (always apply scale-and-shift)")
 
-    # Build per-file metrics
-    per_file_metrics = {}
-    for i, entry in enumerate(processed_entries):
-        hierarchy = entry["hierarchy"]
-        eid = entry["id"]
-        raw_value = _build_per_file_depth_value(stores["raw"], i)
-        aligned_value = _build_per_file_depth_value(stores["aligned"], i)
-        set_value(
-            per_file_metrics,
-            hierarchy,
-            eid,
-            {
-                "id": eid,
-                "metrics": {
-                    "depth": aligned_value,
-                    "depth_raw": raw_value,
-                    "depth_aligned": aligned_value,
+    with tempfile.TemporaryDirectory(prefix="euler_eval_depth_") as temp_dir_str:
+        temp_dir = Path(temp_dir_str)
+        gt_depth_dir = temp_dir / "gt_depth"
+        raw_pred_dir = temp_dir / "raw_pred"
+        aligned_pred_dir = temp_dir / "aligned_pred"
+        gt_depth_dir.mkdir()
+        raw_pred_dir.mkdir()
+        aligned_pred_dir.mkdir()
+
+        stores = {
+            "raw": _init_metric_store(temp_dir, "raw"),
+            "aligned": _init_metric_store(temp_dir, "aligned"),
+        }
+        gt_depth_paths: list[str] = []
+        per_file_metrics = {}
+
+        try:
+            print("Computing per-image depth metrics...")
+            for i in tqdm(range(num_samples), desc="Processing depth pairs"):
+                sample = dataset[i]
+                hierarchy, entry_id = _extract_hierarchy(sample)
+
+                depth_gt = to_numpy_depth(sample["gt"])
+                depth_pred = to_numpy_depth(sample["pred"])
+
+                if i == 0:
+                    gt_native_dims = depth_gt.shape[:2]
+                    pred_native_dims = depth_pred.shape[:2]
+                    spatial_method = classify_spatial_alignment(
+                        *gt_native_dims, *pred_native_dims
+                    )
+
+                if depth_gt.shape[:2] != depth_pred.shape[:2]:
+                    if not logged_alignment:
+                        print(
+                            f"  Aligning GT {depth_gt.shape[:2]} -> "
+                            f"pred {depth_pred.shape[:2]}"
+                        )
+                        logged_alignment = True
+                    depth_gt = align_to_prediction(depth_gt, depth_pred)
+
+                intrinsics_K = _get_intrinsics_K(sample)
+
+                sky_valid = None
+                if sky_mask_enabled:
+                    sky_valid = _get_sky_mask(sample)
+                    if (
+                        sky_valid is not None
+                        and sky_valid.shape[:2] != depth_pred.shape[:2]
+                    ):
+                        sky_valid = align_to_prediction(sky_valid, depth_pred)
+
+                if alignment_mode == "auto_affine" and i == 0:
+                    pred_min = float(np.nanmin(depth_pred))
+                    pred_max = float(np.nanmax(depth_pred))
+                    if pred_max <= 1.0 + 1e-3 and pred_min >= -1.0 - 1e-3:
+                        normalized_predictions = True
+                        print(
+                            f"  Scale-and-shift: detected normalized predictions "
+                            f"(range [{pred_min:.3f}, {pred_max:.3f}])"
+                        )
+                    else:
+                        print(
+                            f"  Scale-and-shift: predictions appear metric "
+                            f"(range [{pred_min:.1f}, {pred_max:.1f}]), "
+                            f"skipping alignment"
+                        )
+
+                depth_gt = process_depth(depth_gt, 1.0, is_radial, intrinsics_K)
+                depth_pred_raw = process_depth(depth_pred, 1.0, is_radial, intrinsics_K)
+
+                if alignment_mode == "none":
+                    depth_pred_aligned = depth_pred_raw
+                else:
+                    do_alignment = alignment_mode == "affine" or normalized_predictions
+                    if do_alignment:
+                        fit_source = depth_pred if normalized_predictions else depth_pred_raw
+                        fit_mask = (
+                            (depth_gt > 0)
+                            & np.isfinite(depth_gt)
+                            & np.isfinite(fit_source)
+                        )
+                        if sky_valid is not None:
+                            fit_mask = fit_mask & sky_valid
+                        depth_pred_aligned, s, t = compute_scale_and_shift(
+                            fit_source, depth_gt, fit_mask
+                        )
+                        alignment_applied = True
+                        if verbose and not logged_stats:
+                            print(f"  Fitted scale={s:.4f}, shift={t:.4f}")
+                    else:
+                        depth_pred_aligned = depth_pred_raw
+
+                if verbose and not logged_stats:
+                    _log_sample_stats(depth_gt, depth_pred_aligned, "DEPTH")
+                    logged_stats = True
+
+                gt_depth_path = _write_npy_array(str(gt_depth_dir), i, depth_gt)
+                raw_pred_path = _write_npy_array(str(raw_pred_dir), i, depth_pred_raw)
+                gt_depth_paths.append(gt_depth_path)
+
+                raw_valid_mask = _build_valid_mask(depth_gt, depth_pred_raw, sky_valid)
+                raw_metrics = _compute_branch_metrics(depth_gt, depth_pred_raw, raw_valid_mask)
+                _append_metrics(stores["raw"], raw_metrics, raw_pred_path)
+
+                if depth_pred_aligned is depth_pred_raw:
+                    aligned_metrics = raw_metrics
+                else:
+                    aligned_valid_mask = _build_valid_mask(
+                        depth_gt, depth_pred_aligned, sky_valid
+                    )
+                    aligned_metrics = _compute_branch_metrics(
+                        depth_gt, depth_pred_aligned, aligned_valid_mask
+                    )
+                    aligned_pred_path = _write_npy_array(
+                        str(aligned_pred_dir), i, depth_pred_aligned
+                    )
+                    _append_metrics(stores["aligned"], aligned_metrics, aligned_pred_path)
+
+                raw_value = _build_per_file_depth_value(raw_metrics)
+                aligned_value = (
+                    raw_value
+                    if aligned_metrics is raw_metrics
+                    else _build_per_file_depth_value(aligned_metrics)
+                )
+                set_value(
+                    per_file_metrics,
+                    hierarchy,
+                    entry_id,
+                    {
+                        "id": entry_id,
+                        "metrics": {
+                            "depth": aligned_value,
+                            "depth_raw": raw_value,
+                            "depth_aligned": aligned_value,
+                        },
+                    },
+                )
+
+                if sanity_checker is not None:
+                    sanity_checker.validate_depth_input(
+                        depth_gt, depth_pred_aligned, entry_id
+                    )
+                    pm = aligned_metrics["psnr_meta"]
+                    if pm["max_val_used"] is not None:
+                        sanity_checker.validate_depth_psnr(
+                            aligned_metrics["psnr_val"], pm["max_val_used"], entry_id
+                        )
+                    sm = aligned_metrics["ssim_meta"]
+                    if sm["depth_range"] is not None:
+                        sanity_checker.validate_depth_ssim(
+                            aligned_metrics["ssim_val"], sm["depth_range"], entry_id
+                        )
+                    am = aligned_metrics["absrel_meta"]
+                    if am["median"] is not None:
+                        sanity_checker.validate_depth_absrel(
+                            am["median"], am["p90"], entry_id
+                        )
+                    if sm["depth_range"] is not None and len(aligned_metrics["rmse_arr"]) > 0:
+                        rmse_val = float(np.sqrt(np.mean(aligned_metrics["rmse_arr"])))
+                        sanity_checker.validate_depth_rmse(
+                            rmse_val, sm["depth_range"], entry_id
+                        )
+                    sv = aligned_metrics["silog_full"]
+                    if np.isfinite(sv):
+                        sanity_checker.validate_depth_silog(sv, entry_id)
+                    nm = aligned_metrics["normal_meta"]
+                    if nm["mean_angle"] is not None:
+                        sanity_checker.validate_normal_consistency(
+                            nm["mean_angle"], nm["valid_pixels_after_erosion"], entry_id
+                        )
+                    ef = aligned_metrics["edge_f1"]
+                    sanity_checker.validate_depth_edge_f1(
+                        ef["pred_edge_pixels"],
+                        ef["gt_edge_pixels"],
+                        ef["total_pixels"],
+                        ef["f1"],
+                        entry_id,
+                    )
+
+            print("Computing FID/KID (this may take a while)...")
+            print("Aggregating depth results...")
+
+            depth_raw = _build_depth_summary(stores["raw"], gt_depth_paths)
+            if alignment_applied:
+                depth_aligned = _build_depth_summary(stores["aligned"], gt_depth_paths)
+            else:
+                depth_aligned = copy.deepcopy(depth_raw)
+
+            return {
+                "depth_raw": depth_raw,
+                "depth_aligned": depth_aligned,
+                "depth": depth_aligned,
+                "per_file_metrics": per_file_metrics,
+                "dataset_info": {
+                    "num_pairs": num_samples,
+                    "gt_name": gt_name,
+                    "pred_name": pred_name,
                 },
-            },
-        )
-
-    results = {
-        "depth_raw": depth_raw,
-        "depth_aligned": depth_aligned,
-        # Backward-compatible alias: "depth" refers to aligned depth.
-        "depth": depth_aligned,
-        "per_file_metrics": per_file_metrics,
-        "dataset_info": {
-            "num_pairs": num_samples,
-            "gt_name": gt_name,
-            "pred_name": pred_name,
-        },
-        "alignment": {
-            "mode": alignment_mode,
-            "applied": alignment_applied,
-        },
-        "spatial_info": {
-            "gt_dimensions": {"height": gt_native_dims[0], "width": gt_native_dims[1]}
-            if gt_native_dims
-            else None,
-            "pred_dimensions": {"height": pred_native_dims[0], "width": pred_native_dims[1]}
-            if pred_native_dims
-            else None,
-            "method": spatial_method,
-            "evaluated_dimensions": {"height": pred_native_dims[0], "width": pred_native_dims[1]}
-            if pred_native_dims
-            else None,
-        },
-    }
-    return results
+                "alignment": {
+                    "mode": alignment_mode,
+                    "applied": alignment_applied,
+                },
+                "spatial_info": {
+                    "gt_dimensions": {"height": gt_native_dims[0], "width": gt_native_dims[1]}
+                    if gt_native_dims
+                    else None,
+                    "pred_dimensions": {"height": pred_native_dims[0], "width": pred_native_dims[1]}
+                    if pred_native_dims
+                    else None,
+                    "method": spatial_method,
+                    "evaluated_dimensions": {
+                        "height": pred_native_dims[0],
+                        "width": pred_native_dims[1],
+                    }
+                    if pred_native_dims
+                    else None,
+                },
+            }
+        finally:
+            for branch_store in stores.values():
+                branch_store["absrel_store"].close()
+                branch_store["rmse_store"].close()
+                branch_store["silog_store"].close()
+                branch_store["normal_store"].close()
 
 
 # ---------------------------------------------------------------------------
@@ -717,19 +824,13 @@ def evaluate_rgb_samples(
         lpips_metric = None
     fid_metric = FIDKIDMetric(device=device) if fid_backend == "builtin" else None
 
-    # Per-image storage
     psnr_values = []
     ssim_values = []
     lpips_values = []
     sce_values = []
     edge_f1_results = []
-    tail_error_arrays = []
     high_freq_results = []
     depth_binned_results = []
-    processed_entries = []
-    depth_binned_per_entry = []
-    all_imgs_gt = []
-    all_imgs_pred = []
 
     logged_stats = False
     logged_alignment = False
@@ -737,298 +838,295 @@ def evaluate_rgb_samples(
     pred_native_dims: Optional[tuple[int, int]] = None
     spatial_method = "none"
 
-    print("Computing per-image RGB metrics...")
-    for i in tqdm(range(num_samples), desc="Processing RGB pairs"):
-        sample = dataset[i]
-        hierarchy, entry_id = _extract_hierarchy(sample)
+    with tempfile.TemporaryDirectory(prefix="euler_eval_rgb_") as temp_dir_str:
+        temp_dir = Path(temp_dir_str)
+        tail_error_store = _StreamingValueStore(str(temp_dir / "tail_errors.bin"))
+        fid_gt_dir = temp_dir / "fid_gt"
+        fid_pred_dir = temp_dir / "fid_pred"
+        fid_gt_dir.mkdir()
+        fid_pred_dir.mkdir()
+        fid_gt_inputs: list[str] = []
+        fid_pred_inputs: list[str] = []
+        per_file_metrics = {}
 
-        img_gt = to_numpy_rgb(sample["gt"])
-        img_pred = to_numpy_rgb(sample["pred"])
+        try:
+            print("Computing per-image RGB metrics...")
+            for i in tqdm(range(num_samples), desc="Processing RGB pairs"):
+                sample = dataset[i]
+                hierarchy, entry_id = _extract_hierarchy(sample)
 
-        # Capture native dimensions from the first sample.
-        if i == 0:
-            gt_native_dims = img_gt.shape[:2]
-            pred_native_dims = img_pred.shape[:2]
-            spatial_method = classify_spatial_alignment(*gt_native_dims, *pred_native_dims)
+                img_gt = to_numpy_rgb(sample["gt"])
+                img_pred = to_numpy_rgb(sample["pred"])
 
-        # Align GT to prediction dimensions (e.g. VAE multiple-of-8 crop)
-        if img_gt.shape[:2] != img_pred.shape[:2]:
-            if not logged_alignment:
-                print(
-                    f"  Aligning GT {img_gt.shape[:2]} -> " f"pred {img_pred.shape[:2]}"
+                if i == 0:
+                    gt_native_dims = img_gt.shape[:2]
+                    pred_native_dims = img_pred.shape[:2]
+                    spatial_method = classify_spatial_alignment(
+                        *gt_native_dims, *pred_native_dims
+                    )
+
+                if img_gt.shape[:2] != img_pred.shape[:2]:
+                    if not logged_alignment:
+                        print(
+                            f"  Aligning GT {img_gt.shape[:2]} -> pred {img_pred.shape[:2]}"
+                        )
+                        logged_alignment = True
+                    img_gt = align_to_prediction(img_gt, img_pred)
+
+                if not logged_stats:
+                    _log_sample_stats(img_gt, img_pred, "RGB")
+                    logged_stats = True
+
+                sky_valid = None
+                if sky_mask_enabled:
+                    sky_valid = _get_sky_mask(sample)
+                    if sky_valid is not None and sky_valid.shape[:2] != img_pred.shape[:2]:
+                        sky_valid = align_to_prediction(sky_valid, img_pred)
+
+                if sanity_checker is not None:
+                    sanity_checker.validate_rgb_input(img_gt, img_pred, entry_id)
+
+                gt_masked = img_gt
+                pred_masked = img_pred
+                if sky_valid is not None:
+                    mask_3c = np.stack([sky_valid] * 3, axis=-1)
+                    gt_masked = img_gt * mask_3c
+                    pred_masked = img_pred * mask_3c
+
+                if fid_backend == "builtin":
+                    fid_gt_inputs.append(_write_npy_array(str(fid_gt_dir), i, gt_masked))
+                    fid_pred_inputs.append(
+                        _write_npy_array(str(fid_pred_dir), i, pred_masked)
+                    )
+                else:
+                    _write_png_image(str(fid_gt_dir), i, gt_masked)
+                    _write_png_image(str(fid_pred_dir), i, pred_masked)
+
+                psnr_val = _safe_compute(
+                    "psnr", entry_id, compute_rgb_psnr, pred_masked, gt_masked
                 )
-                logged_alignment = True
-            img_gt = align_to_prediction(img_gt, img_pred)
-
-        if not logged_stats:
-            _log_sample_stats(img_gt, img_pred, "RGB")
-            logged_stats = True
-
-        processed_entries.append({"hierarchy": hierarchy, "id": entry_id})
-
-        # Sky mask for RGB: zero out masked regions for metrics that don't accept masks
-        sky_valid = None
-        if sky_mask_enabled:
-            sky_valid = _get_sky_mask(sample)
-            if sky_valid is not None and sky_valid.shape[:2] != img_pred.shape[:2]:
-                sky_valid = align_to_prediction(sky_valid, img_pred)
-
-        if sanity_checker is not None:
-            sanity_checker.validate_rgb_input(img_gt, img_pred, entry_id)
-
-        # Apply sky mask to images for metrics that don't support explicit masks
-        gt_masked = img_gt
-        pred_masked = img_pred
-        if sky_valid is not None:
-            mask_3c = np.stack([sky_valid] * 3, axis=-1)
-            gt_masked = img_gt * mask_3c
-            pred_masked = img_pred * mask_3c
-        all_imgs_gt.append(gt_masked)
-        all_imgs_pred.append(pred_masked)
-
-        # Basic quality metrics
-        psnr_values.append(
-            _safe_compute("psnr", entry_id, compute_rgb_psnr, pred_masked, gt_masked)
-        )
-        ssim_values.append(
-            _safe_compute("ssim", entry_id, compute_rgb_ssim, pred_masked, gt_masked)
-        )
-        sce_values.append(
-            _safe_compute("sce", entry_id, compute_sce, pred_masked, gt_masked)
-        )
-        if lpips_metric is not None:
-            lpips_values.append(
-                _safe_compute(
-                    "lpips", entry_id, lpips_metric.compute, pred_masked, gt_masked
+                ssim_val = _safe_compute(
+                    "ssim", entry_id, compute_rgb_ssim, pred_masked, gt_masked
                 )
-            )
-        else:
-            lpips_values.append(None)
-
-        # Edge F1
-        edge_f1_results.append(
-            _safe_compute(
-                "edge_f1", entry_id, compute_rgb_edge_f1, pred_masked, gt_masked
-            )
-        )
-
-        # Tail errors
-        tail_error_arrays.append(
-            _safe_compute(
-                "tail_errors",
-                entry_id,
-                lambda pred, gt: np.abs(pred - gt).mean(axis=-1),
-                pred_masked,
-                gt_masked,
-            )
-        )
-
-        # High-frequency energy
-        high_freq_results.append(
-            _safe_compute(
-                "high_frequency",
-                entry_id,
-                compute_high_freq_energy_comparison,
-                pred_masked,
-                gt_masked,
-            )
-        )
-
-        # Depth-binned photometric error
-        depth_binned_entry = None
-        if has_depth:
-            try:
-                gt_depth_raw = to_numpy_depth(sample["gt_depth"])
-                intrinsics_K = _get_intrinsics_K(sample)
-                gt_depth = process_depth(
-                    gt_depth_raw,
-                    1.0,
-                    depth_meta["radial_depth"],
-                    intrinsics_K,
+                sce_val = _safe_compute(
+                    "sce", entry_id, compute_sce, pred_masked, gt_masked
                 )
-                if gt_depth.shape[:2] != img_pred.shape[:2]:
-                    gt_depth = align_to_prediction(gt_depth, img_pred)
-                depth_binned_entry = compute_depth_binned_photometric_error(
-                    pred_masked, gt_masked, gt_depth
+                if lpips_metric is not None:
+                    lpips_val = _safe_compute(
+                        "lpips", entry_id, lpips_metric.compute, pred_masked, gt_masked
+                    )
+                else:
+                    lpips_val = None
+
+                edge_f1 = _safe_compute(
+                    "edge_f1", entry_id, compute_rgb_edge_f1, pred_masked, gt_masked
                 )
-                depth_binned_results.append(depth_binned_entry)
-            except Exception as e:
-                _warn_metric_failure("depth_binned_photometric", entry_id, e)
+                tail_arr = _safe_compute(
+                    "tail_errors",
+                    entry_id,
+                    lambda pred, gt: np.abs(pred - gt).mean(axis=-1),
+                    pred_masked,
+                    gt_masked,
+                )
+                if tail_arr is not None:
+                    tail_error_store.append(tail_arr)
+                high_freq = _safe_compute(
+                    "high_frequency",
+                    entry_id,
+                    compute_high_freq_energy_comparison,
+                    pred_masked,
+                    gt_masked,
+                )
 
-        depth_binned_per_entry.append(depth_binned_entry)
+                depth_binned_entry = None
+                if has_depth:
+                    try:
+                        gt_depth_raw = to_numpy_depth(sample["gt_depth"])
+                        intrinsics_K = _get_intrinsics_K(sample)
+                        gt_depth = process_depth(
+                            gt_depth_raw,
+                            1.0,
+                            depth_meta["radial_depth"],
+                            intrinsics_K,
+                        )
+                        if gt_depth.shape[:2] != img_pred.shape[:2]:
+                            gt_depth = align_to_prediction(gt_depth, img_pred)
+                        depth_binned_entry = compute_depth_binned_photometric_error(
+                            pred_masked, gt_masked, gt_depth
+                        )
+                        depth_binned_results.append(depth_binned_entry)
+                    except Exception as exc:
+                        _warn_metric_failure("depth_binned_photometric", entry_id, exc)
 
-    # Aggregate
-    print(f"Computing RGB FID using backend: {fid_backend}...")
-    if fid_backend == "builtin":
-        rgb_fid = fid_metric.compute_rgb_fid(
-            all_imgs_gt, all_imgs_pred, batch_size, num_workers
-        )
-    else:
-        rgb_fid = compute_clean_fid(
-            all_imgs_gt,
-            all_imgs_pred,
-            mode="clean",
-            batch_size=batch_size,
-            num_workers=num_workers,
-            device=device,
-            verbose=verbose,
-        )
+                psnr_values.append(psnr_val)
+                ssim_values.append(ssim_val)
+                sce_values.append(sce_val)
+                lpips_values.append(lpips_val)
+                edge_f1_results.append(edge_f1)
+                high_freq_results.append(high_freq)
 
-    print("Aggregating RGB results...")
+                tail_p95 = (
+                    float(np.percentile(tail_arr, 95))
+                    if tail_arr is not None and len(tail_arr) > 0
+                    else None
+                )
+                tail_p99 = (
+                    float(np.percentile(tail_arr, 99))
+                    if tail_arr is not None and len(tail_arr) > 0
+                    else None
+                )
 
-    edge_f1_valid = [r for r in edge_f1_results if r is not None]
-    edge_f1_agg = (
-        aggregate_rgb_edge_f1(edge_f1_valid)
-        if edge_f1_valid
-        else {"precision": None, "recall": None, "f1": None}
-    )
+                rgb_metrics = {
+                    "image_quality": {
+                        "psnr": _none_if_nan(psnr_val),
+                        "ssim": _none_if_nan(ssim_val),
+                        "sce": _none_if_nan(sce_val),
+                        "lpips": _none_if_nan(lpips_val),
+                    },
+                    "edge_f1": {
+                        "precision": _none_if_nan(edge_f1["precision"]) if edge_f1 else None,
+                        "recall": _none_if_nan(edge_f1["recall"]) if edge_f1 else None,
+                        "f1": _none_if_nan(edge_f1["f1"]) if edge_f1 else None,
+                    },
+                    "tail_errors": {
+                        "p95": tail_p95,
+                        "p99": tail_p99,
+                    },
+                    "high_frequency": {
+                        "pred_hf_ratio": _none_if_nan(high_freq["pred_hf_ratio"])
+                        if high_freq
+                        else None,
+                        "gt_hf_ratio": _none_if_nan(high_freq["gt_hf_ratio"])
+                        if high_freq
+                        else None,
+                        "relative_diff": _none_if_nan(high_freq["relative_diff"])
+                        if high_freq
+                        else None,
+                    },
+                }
+                if depth_binned_entry is not None:
+                    rgb_metrics["depth_binned_photometric"] = depth_binned_entry
 
-    tail_valid = [r for r in tail_error_arrays if r is not None]
-    tail_agg = (
-        aggregate_tail_errors(tail_valid) if tail_valid else {"p95": None, "p99": None}
-    )
+                set_value(
+                    per_file_metrics,
+                    hierarchy,
+                    entry_id,
+                    {"id": entry_id, "metrics": {"rgb": rgb_metrics}},
+                )
 
-    high_freq_valid = [r for r in high_freq_results if r is not None]
-    high_freq_agg = (
-        aggregate_high_freq_metrics(high_freq_valid)
-        if high_freq_valid
-        else {
-            "pred_hf_ratio_mean": None,
-            "gt_hf_ratio_mean": None,
-            "relative_diff_mean": None,
-        }
-    )
+                if sanity_checker is not None:
+                    if psnr_val is not None and np.isfinite(psnr_val):
+                        sanity_checker.validate_rgb_psnr(psnr_val, entry_id)
+                    if ssim_val is not None and np.isfinite(ssim_val):
+                        sanity_checker.validate_rgb_ssim(ssim_val, entry_id)
+                    if lpips_val is not None and np.isfinite(lpips_val):
+                        sanity_checker.validate_rgb_lpips(lpips_val, entry_id)
+                    if tail_p99 is not None and np.isfinite(tail_p99):
+                        sanity_checker.validate_tail_errors(tail_p99, entry_id)
+                    if high_freq is not None and np.isfinite(
+                        high_freq.get("relative_diff", float("nan"))
+                    ):
+                        sanity_checker.validate_high_freq_energy(
+                            high_freq["relative_diff"], entry_id
+                        )
+                    if depth_binned_entry is not None:
+                        sanity_checker.validate_depth_binned(depth_binned_entry, entry_id)
 
-    # Post-processing sanity checks
-    if sanity_checker is not None:
-        print("Running post-processing sanity checks for RGB...")
-        for i, entry in enumerate(processed_entries):
-            eid = entry["id"]
-            pv = psnr_values[i]
-            if pv is not None and np.isfinite(pv):
-                sanity_checker.validate_rgb_psnr(pv, eid)
-            sv = ssim_values[i]
-            if sv is not None and np.isfinite(sv):
-                sanity_checker.validate_rgb_ssim(sv, eid)
-            lv = lpips_values[i]
-            if lv is not None and np.isfinite(lv):
-                sanity_checker.validate_rgb_lpips(lv, eid)
-            ta = tail_error_arrays[i]
-            if ta is not None and len(ta) > 0:
-                p99 = float(np.percentile(ta, 99))
-                sanity_checker.validate_tail_errors(p99, eid)
-            hf = high_freq_results[i]
-            if hf is not None and np.isfinite(hf.get("relative_diff", float("nan"))):
-                sanity_checker.validate_high_freq_energy(hf["relative_diff"], eid)
-            db = depth_binned_per_entry[i]
-            if db is not None:
-                sanity_checker.validate_depth_binned(db, eid)
+            print(f"Computing RGB FID using backend: {fid_backend}...")
+            if fid_backend == "builtin":
+                rgb_fid = fid_metric.compute_rgb_fid(
+                    fid_gt_inputs, fid_pred_inputs, batch_size, num_workers
+                )
+            else:
+                rgb_fid = compute_clean_fid(
+                    str(fid_gt_dir),
+                    str(fid_pred_dir),
+                    mode="clean",
+                    batch_size=batch_size,
+                    num_workers=num_workers,
+                    device=device,
+                    verbose=verbose,
+                )
 
-    # Build per-file metrics
-    per_file_metrics = {}
-    for i, entry in enumerate(processed_entries):
-        hierarchy = entry["hierarchy"]
-        eid = entry["id"]
-        edge_f1 = edge_f1_results[i]
-        tail_arr = tail_error_arrays[i]
-        high_freq = high_freq_results[i]
+            print("Aggregating RGB results...")
 
-        rgb_metrics = {
-            "image_quality": {
-                "psnr": _none_if_nan(psnr_values[i]),
-                "ssim": _none_if_nan(ssim_values[i]),
-                "sce": _none_if_nan(sce_values[i]),
-                "lpips": _none_if_nan(lpips_values[i]),
-            },
-            "edge_f1": {
-                "precision": _none_if_nan(edge_f1["precision"]) if edge_f1 else None,
-                "recall": _none_if_nan(edge_f1["recall"]) if edge_f1 else None,
-                "f1": _none_if_nan(edge_f1["f1"]) if edge_f1 else None,
-            },
-            "tail_errors": {
-                "p95": float(np.percentile(tail_arr, 95))
-                if tail_arr is not None and len(tail_arr) > 0
-                else None,
-                "p99": float(np.percentile(tail_arr, 99))
-                if tail_arr is not None and len(tail_arr) > 0
-                else None,
-            },
-            "high_frequency": {
-                "pred_hf_ratio": _none_if_nan(high_freq["pred_hf_ratio"])
-                if high_freq
-                else None,
-                "gt_hf_ratio": _none_if_nan(high_freq["gt_hf_ratio"])
-                if high_freq
-                else None,
-                "relative_diff": _none_if_nan(high_freq["relative_diff"])
-                if high_freq
-                else None,
-            },
-        }
+            edge_f1_valid = [r for r in edge_f1_results if r is not None]
+            edge_f1_agg = (
+                aggregate_rgb_edge_f1(edge_f1_valid)
+                if edge_f1_valid
+                else {"precision": None, "recall": None, "f1": None}
+            )
 
-        db = depth_binned_per_entry[i]
-        if db is not None:
-            rgb_metrics["depth_binned_photometric"] = db
+            tail_p95, tail_p99 = tail_error_store.quantiles([0.95, 0.99])
 
-        set_value(
-            per_file_metrics,
-            hierarchy,
-            eid,
-            {"id": eid, "metrics": {"rgb": rgb_metrics}},
-        )
+            high_freq_valid = [r for r in high_freq_results if r is not None]
+            high_freq_agg = (
+                aggregate_high_freq_metrics(high_freq_valid)
+                if high_freq_valid
+                else {
+                    "pred_hf_ratio_mean": None,
+                    "gt_hf_ratio_mean": None,
+                    "relative_diff_mean": None,
+                }
+            )
 
-    rgb_results = {
-        "image_quality": {
-            "psnr": _safe_mean(psnr_values, "psnr"),
-            "ssim": _safe_mean(ssim_values, "ssim"),
-            "sce": _safe_mean(sce_values, "sce"),
-            "lpips": _safe_mean(lpips_values, "lpips"),
-            "fid": _none_if_nan(rgb_fid),
-        },
-        "edge_f1": {
-            "precision": _none_if_nan(edge_f1_agg["precision"]),
-            "recall": _none_if_nan(edge_f1_agg["recall"]),
-            "f1": _none_if_nan(edge_f1_agg["f1"]),
-        },
-        "tail_errors": {
-            "p95": _none_if_nan(tail_agg["p95"]),
-            "p99": _none_if_nan(tail_agg["p99"]),
-        },
-        "high_frequency": {
-            "pred_hf_ratio": _none_if_nan(high_freq_agg["pred_hf_ratio_mean"]),
-            "gt_hf_ratio": _none_if_nan(high_freq_agg["gt_hf_ratio_mean"]),
-            "relative_diff": _none_if_nan(high_freq_agg["relative_diff_mean"]),
-        },
-    }
+            rgb_results = {
+                "image_quality": {
+                    "psnr": _safe_mean(psnr_values, "psnr"),
+                    "ssim": _safe_mean(ssim_values, "ssim"),
+                    "sce": _safe_mean(sce_values, "sce"),
+                    "lpips": _safe_mean(lpips_values, "lpips"),
+                    "fid": _none_if_nan(rgb_fid),
+                },
+                "edge_f1": {
+                    "precision": _none_if_nan(edge_f1_agg["precision"]),
+                    "recall": _none_if_nan(edge_f1_agg["recall"]),
+                    "f1": _none_if_nan(edge_f1_agg["f1"]),
+                },
+                "tail_errors": {
+                    "p95": _none_if_nan(tail_p95),
+                    "p99": _none_if_nan(tail_p99),
+                },
+                "high_frequency": {
+                    "pred_hf_ratio": _none_if_nan(high_freq_agg["pred_hf_ratio_mean"]),
+                    "gt_hf_ratio": _none_if_nan(high_freq_agg["gt_hf_ratio_mean"]),
+                    "relative_diff": _none_if_nan(high_freq_agg["relative_diff_mean"]),
+                },
+            }
 
-    if depth_binned_results:
-        rgb_results["depth_binned_photometric"] = aggregate_depth_binned_errors(
-            depth_binned_results
-        )
-    elif has_depth:
-        print("Warning: No valid depth_binned_photometric results.")
+            if depth_binned_results:
+                rgb_results["depth_binned_photometric"] = aggregate_depth_binned_errors(
+                    depth_binned_results
+                )
+            elif has_depth:
+                print("Warning: No valid depth_binned_photometric results.")
 
-    return {
-        "rgb": rgb_results,
-        "per_file_metrics": per_file_metrics,
-        "dataset_info": {
-            "num_pairs": num_samples,
-            "gt_name": gt_name,
-            "pred_name": pred_name,
-        },
-        "spatial_info": {
-            "gt_dimensions": {"height": gt_native_dims[0], "width": gt_native_dims[1]}
-            if gt_native_dims
-            else None,
-            "pred_dimensions": {"height": pred_native_dims[0], "width": pred_native_dims[1]}
-            if pred_native_dims
-            else None,
-            "method": spatial_method,
-            "evaluated_dimensions": {"height": pred_native_dims[0], "width": pred_native_dims[1]}
-            if pred_native_dims
-            else None,
-        },
-    }
+            return {
+                "rgb": rgb_results,
+                "per_file_metrics": per_file_metrics,
+                "dataset_info": {
+                    "num_pairs": num_samples,
+                    "gt_name": gt_name,
+                    "pred_name": pred_name,
+                },
+                "spatial_info": {
+                    "gt_dimensions": {"height": gt_native_dims[0], "width": gt_native_dims[1]}
+                    if gt_native_dims
+                    else None,
+                    "pred_dimensions": {"height": pred_native_dims[0], "width": pred_native_dims[1]}
+                    if pred_native_dims
+                    else None,
+                    "method": spatial_method,
+                    "evaluated_dimensions": {
+                        "height": pred_native_dims[0],
+                        "width": pred_native_dims[1],
+                    }
+                    if pred_native_dims
+                    else None,
+                },
+            }
+        finally:
+            tail_error_store.close()
 
 
 # ---------------------------------------------------------------------------

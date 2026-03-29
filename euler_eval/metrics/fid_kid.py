@@ -5,7 +5,7 @@ import platform
 from pathlib import Path
 import shutil
 import tempfile
-from typing import Callable, Optional, Union
+from typing import Callable, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -16,6 +16,9 @@ from scipy import linalg
 from torch.utils.data import DataLoader, Dataset
 from torchvision.models import Inception_V3_Weights, inception_v3
 from tqdm import tqdm
+
+
+ArraySource = Union[np.ndarray, str, Path]
 
 
 def _resolve_device(device: Union[str, torch.device]) -> torch.device:
@@ -61,11 +64,32 @@ def _to_uint8_rgb(img: np.ndarray) -> np.ndarray:
     return np.rint(arr * 255.0).astype(np.uint8)
 
 
-def _write_rgb_image_folder(images: list[np.ndarray], folder: str) -> None:
-    """Write a list of RGB images to a folder as lossless PNG files."""
+def _write_rgb_image_folder(images: Sequence[ArraySource], folder: str) -> None:
+    """Write RGB sources to a folder as lossless PNG files."""
     for index, image in enumerate(images):
         path = f"{folder}/{index:06d}.png"
-        Image.fromarray(_to_uint8_rgb(image), mode="RGB").save(path, format="PNG")
+        Image.fromarray(_to_uint8_rgb(_load_rgb_source(image)), mode="RGB").save(
+            path,
+            format="PNG",
+        )
+
+
+def _load_depth_source(source: ArraySource) -> np.ndarray:
+    """Load a depth source from memory or a .npy file."""
+    if isinstance(source, (str, Path)):
+        return np.load(source, mmap_mode="r")
+    return np.asarray(source)
+
+
+def _load_rgb_source(source: ArraySource) -> np.ndarray:
+    """Load an RGB source from memory, a .npy file, or a standard image."""
+    if isinstance(source, (str, Path)):
+        path = Path(source)
+        if path.suffix.lower() == ".npy":
+            return np.load(path, mmap_mode="r")
+        with Image.open(path) as image:
+            return np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+    return np.asarray(source)
 
 
 def _get_clean_fid_model_target_dir() -> Path:
@@ -107,8 +131,8 @@ def _prepare_clean_fid_inception_cache(clean_downloads) -> None:
 
 
 def compute_clean_fid(
-    images1: list[np.ndarray],
-    images2: list[np.ndarray],
+    images1: Union[Sequence[np.ndarray], str, Path],
+    images2: Union[Sequence[np.ndarray], str, Path],
     *,
     mode: str = "clean",
     batch_size: int = 32,
@@ -133,10 +157,23 @@ def compute_clean_fid(
     _prepare_clean_fid_inception_cache(clean_downloads)
     runtime_device = _resolve_device(device)
 
+    if isinstance(images1, (str, Path)) and isinstance(images2, (str, Path)):
+        return float(
+            clean_fid.compute_fid(
+                str(images1),
+                str(images2),
+                mode=mode,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                device=runtime_device,
+                verbose=verbose,
+            )
+        )
+
     with tempfile.TemporaryDirectory(prefix="euler_eval_cleanfid_gt_") as gt_dir:
         with tempfile.TemporaryDirectory(prefix="euler_eval_cleanfid_pred_") as pred_dir:
-            _write_rgb_image_folder(images1, gt_dir)
-            _write_rgb_image_folder(images2, pred_dir)
+            _write_rgb_image_folder(list(images1), gt_dir)
+            _write_rgb_image_folder(list(images2), pred_dir)
             return float(
                 clean_fid.compute_fid(
                     gt_dir,
@@ -155,17 +192,17 @@ class DepthDataset(Dataset):
 
     def __init__(
         self,
-        depth_maps: list[np.ndarray],
+        depth_maps: Sequence[ArraySource],
         transform: Optional[Callable[[np.ndarray], torch.Tensor]] = None,
     ):
-        self.depth_maps = depth_maps
+        self.depth_maps = list(depth_maps)
         self.transform = transform
 
     def __len__(self) -> int:
         return len(self.depth_maps)
 
     def __getitem__(self, idx: int) -> torch.Tensor:
-        depth = self.depth_maps[idx]
+        depth = _load_depth_source(self.depth_maps[idx])
         if self.transform:
             return self.transform(depth)
 
@@ -178,17 +215,17 @@ class RGBDataset(Dataset):
 
     def __init__(
         self,
-        images: list[np.ndarray],
+        images: Sequence[ArraySource],
         transform: Optional[Callable[[np.ndarray], torch.Tensor]] = None,
     ):
-        self.images = images
+        self.images = list(images)
         self.transform = transform
 
     def __len__(self) -> int:
         return len(self.images)
 
     def __getitem__(self, idx: int) -> torch.Tensor:
-        img = np.asarray(self.images[idx], dtype=np.float32)
+        img = np.asarray(_load_rgb_source(self.images[idx]), dtype=np.float32)
         if img.ndim != 3 or img.shape[-1] != 3:
             raise ValueError(
                 f"Unsupported RGB image shape {img.shape}. Expected (H, W, 3)."
@@ -344,7 +381,7 @@ class FIDKIDMetric:
 
     def _extract_features(
         self,
-        depth_maps: list[np.ndarray],
+        depth_maps: Sequence[ArraySource],
         batch_size: int = 16,
         num_workers: int = 4,
     ) -> np.ndarray:
@@ -376,7 +413,7 @@ class FIDKIDMetric:
 
     def _extract_rgb_features(
         self,
-        images: list[np.ndarray],
+        images: Sequence[ArraySource],
         batch_size: int = 16,
         num_workers: int = 4,
     ) -> np.ndarray:
@@ -399,8 +436,8 @@ class FIDKIDMetric:
 
     def _get_feature_pair(
         self,
-        depths1: list[np.ndarray],
-        depths2: list[np.ndarray],
+        depths1: Sequence[ArraySource],
+        depths2: Sequence[ArraySource],
         batch_size: int,
         num_workers: int,
         input_kind: str = "depth",
@@ -505,8 +542,8 @@ class FIDKIDMetric:
 
     def compute_fid(
         self,
-        depths1: list[np.ndarray],
-        depths2: list[np.ndarray],
+        depths1: Sequence[ArraySource],
+        depths2: Sequence[ArraySource],
         batch_size: int = 16,
         num_workers: int = 4,
     ) -> float:
@@ -518,8 +555,8 @@ class FIDKIDMetric:
 
     def compute_rgb_fid(
         self,
-        images1: list[np.ndarray],
-        images2: list[np.ndarray],
+        images1: Sequence[ArraySource],
+        images2: Sequence[ArraySource],
         batch_size: int = 16,
         num_workers: int = 4,
     ) -> float:
@@ -535,8 +572,8 @@ class FIDKIDMetric:
 
     def compute_kid(
         self,
-        depths1: list[np.ndarray],
-        depths2: list[np.ndarray],
+        depths1: Sequence[ArraySource],
+        depths2: Sequence[ArraySource],
         batch_size: int = 16,
         num_workers: int = 4,
         num_subsets: int = 100,
@@ -555,8 +592,8 @@ class FIDKIDMetric:
 
     def compute_fid_kid(
         self,
-        depths1: list[np.ndarray],
-        depths2: list[np.ndarray],
+        depths1: Sequence[ArraySource],
+        depths2: Sequence[ArraySource],
         batch_size: int = 16,
         num_workers: int = 4,
         num_subsets: int = 100,

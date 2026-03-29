@@ -1,5 +1,7 @@
 """Tests for depth raw/aligned output structure and alignment behavior."""
 
+from pathlib import Path
+
 import numpy as np
 
 import euler_eval.evaluate as eval_mod
@@ -29,11 +31,20 @@ class _DummyFIDKID:
         self.device = device
 
     def compute_fid(self, all_gt, all_pred, batch_size, num_workers):
-        errs = [np.mean(np.abs(g - p)) for g, p in zip(all_gt, all_pred)]
+        errs = [
+            np.mean(np.abs(self._load(g) - self._load(p)))
+            for g, p in zip(all_gt, all_pred)
+        ]
         return float(np.mean(errs))
 
     def compute_kid(self, all_gt, all_pred, batch_size, num_workers):
         return 0.0, 0.0
+
+    @staticmethod
+    def _load(value):
+        if isinstance(value, (str, Path)):
+            return np.load(value)
+        return value
 
 
 def _flatten(values):
