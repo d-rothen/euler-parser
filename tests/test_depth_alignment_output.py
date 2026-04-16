@@ -57,7 +57,7 @@ def _flatten(values):
 def _patch_depth_metrics(monkeypatch):
     monkeypatch.setattr(eval_mod, "LPIPSMetric", _DummyLPIPS)
     monkeypatch.setattr(eval_mod, "FIDKIDMetric", _DummyFIDKID)
-    monkeypatch.setattr(eval_mod, "tqdm", lambda x, desc=None: x)
+    monkeypatch.setattr(eval_mod, "tqdm", lambda x, *a, **kw: x)
 
     def _psnr(pred, gt, valid_mask=None, return_metadata=False):
         diff = np.abs(pred - gt)

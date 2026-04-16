@@ -8,8 +8,10 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
-from typing import Optional
+import torch
+from typing import Iterator, Optional, Tuple
 from PIL import Image
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from euler_loading import MultiModalDataset
@@ -285,6 +287,115 @@ def _write_png_image(folder: str, index: int, image: np.ndarray) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Prefetched sample iteration (worker-parallel I/O)
+# ---------------------------------------------------------------------------
+
+
+def _identity_collate(batch):
+    """Pass single-element batches through without tensor collation.
+
+    Samples are heterogeneous dicts of arrays / intrinsics / modality dicts
+    and cannot be stacked. The DataLoader is used purely for I/O prefetching,
+    so we unwrap the single-element batch back into the original sample dict.
+    """
+    return batch[0]
+
+
+def _prefetched_iter(
+    dataset,
+    num_workers: int,
+    skip: int = 0,
+) -> Iterator[Tuple[int, dict]]:
+    """Yield ``(index, sample)`` pairs with optional worker-based prefetching.
+
+    When ``num_workers > 0`` and the remaining workload outnumbers the
+    worker count, a ``torch.utils.data.DataLoader`` drives worker processes
+    that call ``dataset[i]`` in parallel, overlapping zip/NFS reads with
+    the main process' metric computation. ``num_workers == 0`` (or a
+    dataset small enough that worker spawn cost dominates) falls back to
+    sequential indexing so tests and tiny datasets avoid the overhead.
+    """
+    total = len(dataset)
+    remaining = total - skip
+
+    if num_workers <= 0 or remaining <= num_workers:
+        for i in range(skip, total):
+            yield i, dataset[i]
+        return
+
+    indices = list(range(skip, total))
+    subset = Subset(dataset, indices)
+    loader = DataLoader(
+        subset,
+        batch_size=1,
+        num_workers=num_workers,
+        prefetch_factor=2,
+        collate_fn=_identity_collate,
+        persistent_workers=False,
+        pin_memory=False,
+    )
+    try:
+        for offset, sample in enumerate(loader):
+            yield skip + offset, sample
+    finally:
+        del loader
+
+
+# ---------------------------------------------------------------------------
+# Batched LPIPS accumulator
+# ---------------------------------------------------------------------------
+
+
+class _LPIPSBatcher:
+    """Accumulate (pred, gt) pairs and compute LPIPS in GPU-friendly batches.
+
+    LPIPS is the dominant GPU cost in the per-pair loop. Calling the network
+    once per sample leaves the GPU underutilized, while stacking ``batch_size``
+    pairs into a single forward pass amortizes launch overhead across more
+    work. Each enqueued pair carries a callback that patches the computed
+    value into the caller's accumulators (stores + per-file dicts) so the
+    calling code stays index-agnostic.
+
+    Memory is bounded: at most ``batch_size`` pairs are buffered; buffers are
+    flushed automatically when the batch fills and explicitly via
+    :meth:`finalize` at end of loop.
+    """
+
+    def __init__(self, metric, batch_size: int = 16):
+        self.metric = metric
+        self.batch_size = max(1, int(batch_size))
+        self._pending: list = []
+
+    def enqueue(self, pred: np.ndarray, gt: np.ndarray, callback) -> None:
+        self._pending.append((pred, gt, callback))
+        if len(self._pending) >= self.batch_size:
+            self._flush()
+
+    def _flush(self) -> None:
+        if not self._pending:
+            return
+        preds = [p[0] for p in self._pending]
+        gts = [p[1] for p in self._pending]
+        try:
+            values = self.metric.compute_batch(
+                preds, gts, batch_size=len(self._pending)
+            )
+        except Exception:
+            values = []
+            for pred, gt, _ in self._pending:
+                try:
+                    values.append(float(self.metric.compute(pred, gt)))
+                except Exception:
+                    values.append(float("nan"))
+        for (_, _, cb), v in zip(self._pending, values):
+            cb(v)
+        self._pending.clear()
+
+    def finalize(self) -> None:
+        self._flush()
+
+
+# ---------------------------------------------------------------------------
 # Sky mask extraction
 # ---------------------------------------------------------------------------
 
@@ -438,7 +549,11 @@ def evaluate_depth_samples(
             "psnr_meta": psnr_meta,
             "ssim_val": ssim_val,
             "ssim_meta": ssim_meta,
-            "lpips_val": lpips_metric.compute(depth_pred, depth_gt),
+            # LPIPS is computed later in batches via _LPIPSBatcher for GPU
+            # efficiency; a NaN placeholder keeps _append_metrics and
+            # _build_per_file_depth_value index-aligned until the batcher
+            # patches the real values.
+            "lpips_val": float("nan"),
             "absrel_arr": absrel_arr,
             "absrel_meta": absrel_meta,
             "rmse_arr": rmse_arr,
@@ -614,6 +729,8 @@ def evaluate_depth_samples(
         gt_depth_paths: list[str] = []
         per_file_metrics = {}
 
+        lpips_batcher = _LPIPSBatcher(lpips_metric, batch_size=batch_size)
+
         benchmark_stores = None
         benchmark_boundaries = None
         if benchmark_depth_range is not None:
@@ -629,8 +746,12 @@ def evaluate_depth_samples(
 
         try:
             print("Computing per-image depth metrics...")
-            for i in tqdm(range(num_samples), desc="Processing depth pairs"):
-                sample = dataset[i]
+            depth_iter = _prefetched_iter(dataset, num_workers)
+            for i, sample in tqdm(
+                depth_iter,
+                total=num_samples,
+                desc="Processing depth pairs",
+            ):
                 hierarchy, entry_id = _extract_hierarchy(sample)
 
                 depth_gt = to_numpy_depth(sample["gt"])
@@ -762,6 +883,42 @@ def evaluate_depth_samples(
                     },
                 )
 
+                # -- Enqueue batched LPIPS; callbacks patch the placeholders --
+                raw_lpips_slot = len(stores["raw"]["lpips_values"]) - 1
+
+                def _raw_lpips_cb(
+                    v,
+                    _store=stores["raw"],
+                    _slot=raw_lpips_slot,
+                    _per_file=raw_value,
+                ):
+                    val = float(v) if np.isfinite(v) else float("nan")
+                    _store["lpips_values"][_slot] = val
+                    _per_file["image_quality"]["lpips"] = (
+                        val if np.isfinite(val) else None
+                    )
+
+                lpips_batcher.enqueue(depth_pred_raw, depth_gt, _raw_lpips_cb)
+
+                if aligned_metrics is not raw_metrics:
+                    aligned_lpips_slot = len(stores["aligned"]["lpips_values"]) - 1
+
+                    def _aligned_lpips_cb(
+                        v,
+                        _store=stores["aligned"],
+                        _slot=aligned_lpips_slot,
+                        _per_file=aligned_value,
+                    ):
+                        val = float(v) if np.isfinite(v) else float("nan")
+                        _store["lpips_values"][_slot] = val
+                        _per_file["image_quality"]["lpips"] = (
+                            val if np.isfinite(val) else None
+                        )
+
+                    lpips_batcher.enqueue(
+                        depth_pred_aligned, depth_gt, _aligned_lpips_cb
+                    )
+
                 # -- Benchmark depth-range metrics (aligned only) --
                 if benchmark_stores is not None:
                     bm_bins = get_benchmark_depth_bins(
@@ -854,6 +1011,9 @@ def evaluate_depth_samples(
                         ef["f1"],
                         entry_id,
                     )
+
+            print("Computing batched LPIPS (tail flush)...")
+            lpips_batcher.finalize()
 
             print("Computing FID/KID (this may take a while)...")
             print("Aggregating depth results...")
@@ -1035,10 +1195,20 @@ def evaluate_rgb_samples(
         fid_pred_inputs: list[str] = []
         per_file_metrics = {}
 
+        rgb_lpips_batcher = (
+            _LPIPSBatcher(lpips_metric, batch_size=batch_size)
+            if lpips_metric is not None
+            else None
+        )
+
         try:
             print("Computing per-image RGB metrics...")
-            for i in tqdm(range(num_samples), desc="Processing RGB pairs"):
-                sample = dataset[i]
+            rgb_iter = _prefetched_iter(dataset, num_workers)
+            for i, sample in tqdm(
+                rgb_iter,
+                total=num_samples,
+                desc="Processing RGB pairs",
+            ):
                 hierarchy, entry_id = _extract_hierarchy(sample)
 
                 img_gt = to_numpy_rgb(sample["gt"])
@@ -1097,12 +1267,9 @@ def evaluate_rgb_samples(
                 sce_val = _safe_compute(
                     "sce", entry_id, compute_sce, pred_masked, gt_masked
                 )
-                if lpips_metric is not None:
-                    lpips_val = _safe_compute(
-                        "lpips", entry_id, lpips_metric.compute, pred_masked, gt_masked
-                    )
-                else:
-                    lpips_val = None
+                # LPIPS is computed later in batches via _LPIPSBatcher for GPU
+                # efficiency. The placeholder is patched in the enqueue callback.
+                lpips_val = float("nan") if lpips_metric is not None else None
 
                 edge_f1 = _safe_compute(
                     "edge_f1", entry_id, compute_rgb_edge_f1, pred_masked, gt_masked
@@ -1237,13 +1404,31 @@ def evaluate_rgb_samples(
                     {"id": entry_id, "metrics": {"rgb": rgb_metrics}},
                 )
 
+                # -- Enqueue batched LPIPS; callback patches the placeholder --
+                if rgb_lpips_batcher is not None:
+                    lpips_slot = len(lpips_values) - 1
+
+                    def _rgb_lpips_cb(
+                        v,
+                        _slot=lpips_slot,
+                        _per_file=rgb_metrics,
+                        _entry_id=entry_id,
+                    ):
+                        val = float(v) if np.isfinite(v) else float("nan")
+                        lpips_values[_slot] = val
+                        _per_file["image_quality"]["lpips"] = (
+                            val if np.isfinite(val) else None
+                        )
+                        if sanity_checker is not None and np.isfinite(val):
+                            sanity_checker.validate_rgb_lpips(val, _entry_id)
+
+                    rgb_lpips_batcher.enqueue(pred_masked, gt_masked, _rgb_lpips_cb)
+
                 if sanity_checker is not None:
                     if psnr_val is not None and np.isfinite(psnr_val):
                         sanity_checker.validate_rgb_psnr(psnr_val, entry_id)
                     if ssim_val is not None and np.isfinite(ssim_val):
                         sanity_checker.validate_rgb_ssim(ssim_val, entry_id)
-                    if lpips_val is not None and np.isfinite(lpips_val):
-                        sanity_checker.validate_rgb_lpips(lpips_val, entry_id)
                     if tail_p99 is not None and np.isfinite(tail_p99):
                         sanity_checker.validate_tail_errors(tail_p99, entry_id)
                     if high_freq is not None and np.isfinite(
@@ -1254,6 +1439,10 @@ def evaluate_rgb_samples(
                         )
                     if depth_binned_entry is not None:
                         sanity_checker.validate_depth_binned(depth_binned_entry, entry_id)
+
+            if rgb_lpips_batcher is not None:
+                print("Computing batched RGB LPIPS (tail flush)...")
+                rgb_lpips_batcher.finalize()
 
             print(f"Computing RGB FID using backend: {fid_backend}...")
             if fid_backend == "builtin":
@@ -1383,6 +1572,7 @@ def evaluate_rays_samples(
     fov_domain: Optional[str] = None,
     gt_name: str = "GT",
     pred_name: str = "Pred",
+    num_workers: int = 4,
     verbose: bool = False,
     sanity_checker: Optional[SanityChecker] = None,
 ) -> dict:
@@ -1403,6 +1593,8 @@ def evaluate_rays_samples(
             ``"lfov"`` if no intrinsics are available.
         gt_name: GT dataset display name.
         pred_name: Prediction dataset display name.
+        num_workers: Data loading workers for the prefetched per-pair
+            iteration. Set to 0 to disable worker-based prefetching.
         verbose: Enable verbose output.
         sanity_checker: Optional SanityChecker.
 
@@ -1445,8 +1637,12 @@ def evaluate_rays_samples(
     per_file_metrics = {}
 
     print("Computing per-image rays metrics...")
-    for i in tqdm(range(num_samples), desc="Processing rays pairs"):
-        sample = dataset[i]
+    rays_iter = _prefetched_iter(dataset, num_workers)
+    for i, sample in tqdm(
+        rays_iter,
+        total=num_samples,
+        desc="Processing rays pairs",
+    ):
         hierarchy, entry_id = _extract_hierarchy(sample)
 
         dirs_gt = to_numpy_directions(sample["gt"])

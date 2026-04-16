@@ -68,7 +68,7 @@ def test_rgb_output_contains_dataset_fid(monkeypatch):
 
     monkeypatch.setattr(eval_mod, "RGBLPIPSMetric", _DummyLPIPS)
     monkeypatch.setattr(eval_mod, "FIDKIDMetric", _DummyFIDKID)
-    monkeypatch.setattr(eval_mod, "tqdm", lambda x, desc=None: x)
+    monkeypatch.setattr(eval_mod, "tqdm", lambda x, *a, **kw: x)
 
     results = eval_mod.evaluate_rgb_samples(
         dataset=_make_dataset(),
@@ -105,7 +105,7 @@ def test_rgb_clean_fid_backend_bypasses_builtin_metric(monkeypatch):
     monkeypatch.setattr(eval_mod, "RGBLPIPSMetric", _DummyLPIPS)
     monkeypatch.setattr(eval_mod, "FIDKIDMetric", _BuiltinShouldNotBeUsed)
     monkeypatch.setattr(eval_mod, "compute_clean_fid", _fake_clean_fid)
-    monkeypatch.setattr(eval_mod, "tqdm", lambda x, desc=None: x)
+    monkeypatch.setattr(eval_mod, "tqdm", lambda x, *a, **kw: x)
 
     results = eval_mod.evaluate_rgb_samples(
         dataset=_make_dataset(),

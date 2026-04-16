@@ -1084,6 +1084,7 @@ def main():
                 fov_domain=rays_meta["fov_domain"],
                 gt_name=gt.get("name", "GT"),
                 pred_name=ds_name,
+                num_workers=args.num_workers,
                 verbose=args.verbose,
                 sanity_checker=sanity_checker,
             )
