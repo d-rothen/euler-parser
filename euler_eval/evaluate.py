@@ -71,6 +71,7 @@ from .metrics import (
     _BENCHMARK_BIN_NAMES,
     # GPU-batched image metrics
     GPUImageMetricsBatcher,
+    GPUDepthMetricsBatcher,
 )
 
 SKY_MASK_ALIGNMENT_MAX_GT_PERCENTILE = 95.0
@@ -527,20 +528,41 @@ def evaluate_depth_samples(
         }
 
     def _compute_branch_metrics(
-        depth_gt: np.ndarray, depth_pred: np.ndarray, valid_mask: Optional[np.ndarray]
+        depth_gt: np.ndarray,
+        depth_pred: np.ndarray,
+        valid_mask: Optional[np.ndarray],
+        defer_to_batcher: bool = False,
     ) -> dict:
-        psnr_val, psnr_meta = compute_psnr(
-            depth_pred, depth_gt, valid_mask=valid_mask, return_metadata=True
-        )
-        ssim_val, ssim_meta = compute_ssim(depth_pred, depth_gt, return_metadata=True)
-        absrel_arr, absrel_meta = compute_absrel(
-            depth_pred, depth_gt, valid_mask=valid_mask, return_metadata=True
-        )
-        rmse_arr = compute_rmse_per_pixel(depth_pred, depth_gt, valid_mask=valid_mask)
-        silog_arr = compute_silog_per_pixel(depth_pred, depth_gt, valid_mask=valid_mask)
-        silog_val = compute_scale_invariant_log_error(
-            depth_pred, depth_gt, valid_mask=valid_mask
-        )
+        if defer_to_batcher:
+            # Batched on GPU by depth_metrics_batcher; callback patches.
+            psnr_val = float("nan")
+            psnr_meta: dict = {}
+            ssim_val = float("nan")
+            ssim_meta = {}
+            absrel_arr = None
+            absrel_meta = {}
+            rmse_arr = None
+            silog_arr = None
+            silog_val = float("nan")
+        else:
+            psnr_val, psnr_meta = compute_psnr(
+                depth_pred, depth_gt, valid_mask=valid_mask, return_metadata=True
+            )
+            ssim_val, ssim_meta = compute_ssim(
+                depth_pred, depth_gt, return_metadata=True
+            )
+            absrel_arr, absrel_meta = compute_absrel(
+                depth_pred, depth_gt, valid_mask=valid_mask, return_metadata=True
+            )
+            rmse_arr = compute_rmse_per_pixel(
+                depth_pred, depth_gt, valid_mask=valid_mask
+            )
+            silog_arr = compute_silog_per_pixel(
+                depth_pred, depth_gt, valid_mask=valid_mask
+            )
+            silog_val = compute_scale_invariant_log_error(
+                depth_pred, depth_gt, valid_mask=valid_mask
+            )
         normal_angles, normal_meta = compute_normal_angles(
             depth_pred, depth_gt, valid_mask=valid_mask, return_metadata=True
         )
@@ -573,9 +595,15 @@ def evaluate_depth_samples(
         store["silog_full_values"].append(metrics["silog_full"])
         store["edge_f1_results"].append(metrics["edge_f1"])
         store["pred_depth_paths"].append(pred_depth_path)
-        store["absrel_store"].append(metrics["absrel_arr"])
-        store["rmse_store"].append(np.sqrt(metrics["rmse_arr"]))
-        store["silog_store"].append(metrics["silog_arr"])
+        # When deferred to the GPU depth batcher, these per-pixel arrays are
+        # appended from the enqueue callback instead (order-invariant for
+        # quantile aggregation).
+        if metrics["absrel_arr"] is not None:
+            store["absrel_store"].append(metrics["absrel_arr"])
+        if metrics["rmse_arr"] is not None:
+            store["rmse_store"].append(np.sqrt(metrics["rmse_arr"]))
+        if metrics["silog_arr"] is not None:
+            store["silog_store"].append(metrics["silog_arr"])
         store["normal_store"].append(metrics["normal_angles"])
         if len(metrics["normal_angles"]) > 0:
             store["normal_below_11_25"] += int(np.sum(metrics["normal_angles"] < 11.25))
@@ -680,8 +708,14 @@ def evaluate_depth_samples(
                 else None,
             },
             "depth_metrics": {
-                "absrel": float(np.mean(absrel_arr)) if len(absrel_arr) > 0 else None,
-                "rmse": float(np.sqrt(np.mean(rmse_arr))) if len(rmse_arr) > 0 else None,
+                # absrel/rmse start None when the depth batcher is deferred; the
+                # enqueue callback patches them with the batched values.
+                "absrel": float(np.mean(absrel_arr))
+                if absrel_arr is not None and len(absrel_arr) > 0
+                else None,
+                "rmse": float(np.sqrt(np.mean(rmse_arr)))
+                if rmse_arr is not None and len(rmse_arr) > 0
+                else None,
                 "silog": float(metrics["silog_full"])
                 if np.isfinite(metrics["silog_full"])
                 else None,
@@ -699,6 +733,76 @@ def evaluate_depth_samples(
                 },
             },
         }
+
+    def _apply_depth_batch_result(
+        result: dict, metrics: dict, store: dict, slot: int, per_file: dict
+    ) -> None:
+        """Patch deferred depth-metric placeholders with batched GPU results."""
+        psnr_val = result["psnr_val"]
+        ssim_val = result["ssim_val"]
+        absrel_arr = result["absrel_arr"]
+        rmse_arr = result["rmse_arr"]
+        silog_arr = result["silog_arr"]
+        silog_full = result["silog_full"]
+
+        metrics["psnr_val"] = psnr_val
+        metrics["psnr_meta"] = result["psnr_meta"]
+        metrics["ssim_val"] = ssim_val
+        metrics["ssim_meta"] = result["ssim_meta"]
+        metrics["absrel_arr"] = absrel_arr
+        metrics["absrel_meta"] = result["absrel_meta"]
+        metrics["rmse_arr"] = rmse_arr
+        metrics["silog_arr"] = silog_arr
+        metrics["silog_full"] = silog_full
+
+        store["psnr_values"][slot] = psnr_val
+        store["ssim_values"][slot] = ssim_val
+        store["silog_full_values"][slot] = silog_full
+
+        # Streaming-store appends are order-invariant for quantile aggregation.
+        store["absrel_store"].append(absrel_arr)
+        store["rmse_store"].append(np.sqrt(rmse_arr))
+        store["silog_store"].append(silog_arr)
+
+        per_file["image_quality"]["psnr"] = (
+            float(psnr_val) if np.isfinite(psnr_val) else None
+        )
+        per_file["image_quality"]["ssim"] = (
+            float(ssim_val) if np.isfinite(ssim_val) else None
+        )
+        per_file["depth_metrics"]["absrel"] = (
+            float(np.mean(absrel_arr)) if len(absrel_arr) > 0 else None
+        )
+        per_file["depth_metrics"]["rmse"] = (
+            float(np.sqrt(np.mean(rmse_arr))) if len(rmse_arr) > 0 else None
+        )
+        per_file["depth_metrics"]["silog"] = (
+            float(silog_full) if np.isfinite(silog_full) else None
+        )
+
+    def _run_deferred_depth_sanity(
+        checker, metrics: dict, entry_id: str
+    ) -> None:
+        """Sanity checks that depend on the batched PSNR/SSIM/AbsRel/RMSE/SILog."""
+        pm = metrics["psnr_meta"]
+        if pm.get("max_val_used") is not None:
+            checker.validate_depth_psnr(
+                metrics["psnr_val"], pm["max_val_used"], entry_id
+            )
+        sm = metrics["ssim_meta"]
+        if sm.get("depth_range") is not None:
+            checker.validate_depth_ssim(
+                metrics["ssim_val"], sm["depth_range"], entry_id
+            )
+        am = metrics["absrel_meta"]
+        if am.get("median") is not None:
+            checker.validate_depth_absrel(am["median"], am["p90"], entry_id)
+        if sm.get("depth_range") is not None and len(metrics["rmse_arr"]) > 0:
+            rmse_val = float(np.sqrt(np.mean(metrics["rmse_arr"])))
+            checker.validate_depth_rmse(rmse_val, sm["depth_range"], entry_id)
+        sv = metrics["silog_full"]
+        if np.isfinite(sv):
+            checker.validate_depth_silog(sv, entry_id)
 
     logged_stats = False
     logged_alignment = False
@@ -732,6 +836,11 @@ def evaluate_depth_samples(
         per_file_metrics = {}
 
         lpips_batcher = _LPIPSBatcher(lpips_metric, batch_size=batch_size)
+        depth_metrics_batcher = (
+            GPUDepthMetricsBatcher(device=device, batch_size=batch_size)
+            if GPUDepthMetricsBatcher.is_available(device)
+            else None
+        )
 
         benchmark_stores = None
         benchmark_boundaries = None
@@ -847,18 +956,28 @@ def evaluate_depth_samples(
                 raw_pred_path = _write_npy_array(str(raw_pred_dir), i, depth_pred_raw)
                 gt_depth_paths.append(gt_depth_path)
 
+                defer_depth = depth_metrics_batcher is not None
                 raw_valid_mask = _build_valid_mask(depth_gt, depth_pred_raw, sky_valid)
-                raw_metrics = _compute_branch_metrics(depth_gt, depth_pred_raw, raw_valid_mask)
+                raw_metrics = _compute_branch_metrics(
+                    depth_gt,
+                    depth_pred_raw,
+                    raw_valid_mask,
+                    defer_to_batcher=defer_depth,
+                )
                 _append_metrics(stores["raw"], raw_metrics, raw_pred_path)
 
                 if depth_pred_aligned is depth_pred_raw:
                     aligned_metrics = raw_metrics
+                    aligned_valid_mask = raw_valid_mask
                 else:
                     aligned_valid_mask = _build_valid_mask(
                         depth_gt, depth_pred_aligned, sky_valid
                     )
                     aligned_metrics = _compute_branch_metrics(
-                        depth_gt, depth_pred_aligned, aligned_valid_mask
+                        depth_gt,
+                        depth_pred_aligned,
+                        aligned_valid_mask,
+                        defer_to_batcher=defer_depth,
                     )
                     aligned_pred_path = _write_npy_array(
                         str(aligned_pred_dir), i, depth_pred_aligned
@@ -921,6 +1040,70 @@ def evaluate_depth_samples(
                         depth_pred_aligned, depth_gt, _aligned_lpips_cb
                     )
 
+                # -- Enqueue batched GPU depth metrics; callbacks patch the
+                # placeholders that _compute_branch_metrics(defer_to_batcher=True)
+                # left behind and run the deferred sanity checks on the aligned
+                # branch.
+                if defer_depth:
+                    raw_depth_slot = len(stores["raw"]["psnr_values"]) - 1
+                    # When aligned == raw, there is only one enqueue; run the
+                    # aligned sanity inside the raw callback since aligned_metrics
+                    # is the same dict.
+                    run_sanity_in_raw = (
+                        aligned_metrics is raw_metrics and sanity_checker is not None
+                    )
+
+                    def _raw_depth_cb(
+                        result,
+                        _metrics=raw_metrics,
+                        _store=stores["raw"],
+                        _slot=raw_depth_slot,
+                        _pf=raw_value,
+                        _sanity_in_cb=run_sanity_in_raw,
+                        _sanity=sanity_checker,
+                        _entry_id=entry_id,
+                    ):
+                        _apply_depth_batch_result(
+                            result, _metrics, _store, _slot, _pf
+                        )
+                        if _sanity_in_cb:
+                            _run_deferred_depth_sanity(
+                                _sanity, _metrics, _entry_id
+                            )
+
+                    depth_metrics_batcher.enqueue(
+                        depth_pred_raw, depth_gt, raw_valid_mask, _raw_depth_cb
+                    )
+
+                    if aligned_metrics is not raw_metrics:
+                        aligned_depth_slot = (
+                            len(stores["aligned"]["psnr_values"]) - 1
+                        )
+
+                        def _aligned_depth_cb(
+                            result,
+                            _metrics=aligned_metrics,
+                            _store=stores["aligned"],
+                            _slot=aligned_depth_slot,
+                            _pf=aligned_value,
+                            _sanity=sanity_checker,
+                            _entry_id=entry_id,
+                        ):
+                            _apply_depth_batch_result(
+                                result, _metrics, _store, _slot, _pf
+                            )
+                            if _sanity is not None:
+                                _run_deferred_depth_sanity(
+                                    _sanity, _metrics, _entry_id
+                                )
+
+                        depth_metrics_batcher.enqueue(
+                            depth_pred_aligned,
+                            depth_gt,
+                            aligned_valid_mask,
+                            _aligned_depth_cb,
+                        )
+
                 # -- Benchmark depth-range metrics (aligned only) --
                 if benchmark_stores is not None:
                     bm_bins = get_benchmark_depth_bins(
@@ -977,29 +1160,11 @@ def evaluate_depth_samples(
                     sanity_checker.validate_depth_input(
                         depth_gt, depth_pred_aligned, entry_id
                     )
-                    pm = aligned_metrics["psnr_meta"]
-                    if pm["max_val_used"] is not None:
-                        sanity_checker.validate_depth_psnr(
-                            aligned_metrics["psnr_val"], pm["max_val_used"], entry_id
+                    if not defer_depth:
+                        # When deferred, the batcher callback runs these.
+                        _run_deferred_depth_sanity(
+                            sanity_checker, aligned_metrics, entry_id
                         )
-                    sm = aligned_metrics["ssim_meta"]
-                    if sm["depth_range"] is not None:
-                        sanity_checker.validate_depth_ssim(
-                            aligned_metrics["ssim_val"], sm["depth_range"], entry_id
-                        )
-                    am = aligned_metrics["absrel_meta"]
-                    if am["median"] is not None:
-                        sanity_checker.validate_depth_absrel(
-                            am["median"], am["p90"], entry_id
-                        )
-                    if sm["depth_range"] is not None and len(aligned_metrics["rmse_arr"]) > 0:
-                        rmse_val = float(np.sqrt(np.mean(aligned_metrics["rmse_arr"])))
-                        sanity_checker.validate_depth_rmse(
-                            rmse_val, sm["depth_range"], entry_id
-                        )
-                    sv = aligned_metrics["silog_full"]
-                    if np.isfinite(sv):
-                        sanity_checker.validate_depth_silog(sv, entry_id)
                     nm = aligned_metrics["normal_meta"]
                     if nm["mean_angle"] is not None:
                         sanity_checker.validate_normal_consistency(
@@ -1013,6 +1178,10 @@ def evaluate_depth_samples(
                         ef["f1"],
                         entry_id,
                     )
+
+            if depth_metrics_batcher is not None:
+                print("Computing batched GPU depth metrics (tail flush)...")
+                depth_metrics_batcher.finalize()
 
             print("Computing batched LPIPS (tail flush)...")
             lpips_batcher.finalize()

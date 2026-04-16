@@ -21,6 +21,7 @@ Rays metrics:
 
 # GPU-batched image metrics
 from .gpu_image_batch import GPUImageMetricsBatcher
+from .gpu_depth_batch import GPUDepthMetricsBatcher
 
 # Depth metrics
 from .psnr import compute_psnr
@@ -165,4 +166,5 @@ __all__ = [
     "_BENCHMARK_BIN_NAMES",
     # GPU-batched image metrics
     "GPUImageMetricsBatcher",
+    "GPUDepthMetricsBatcher",
 ]
