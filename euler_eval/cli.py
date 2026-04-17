@@ -56,11 +56,11 @@ class _EvalNamespace(MetricNamespace):
 
 # ── Axis declarations ───────────────────────────────────────────────────────
 
-_DEPTH_ALIGNMENT_AXIS = AxisDeclaration(
+_DEPTH_SPACE_AXIS = AxisDeclaration(
     position=0,
-    values=("raw", "aligned"),
+    values=("native", "metric"),
     optional=False,
-    description="Depth alignment mode",
+    description="Depth space semantics",
 )
 
 _DEPTH_CATEGORY_AXIS = AxisDeclaration(
@@ -107,7 +107,7 @@ _RGB_BENCHMARK_BIN_AXIS = AxisDeclaration(
 
 def _depth_eval_axes(*, benchmark: bool = False) -> dict[str, AxisDeclaration]:
     axes = {
-        "alignment": _DEPTH_ALIGNMENT_AXIS,
+        "space": _DEPTH_SPACE_AXIS,
         "category": _DEPTH_CATEGORY_AXIS,
         "reduction": _DEPTH_REDUCTION_AXIS,
     }
@@ -691,7 +691,10 @@ def main():
         type=str,
         default="auto_affine",
         choices=["none", "auto_affine", "affine"],
-        help="Depth alignment mode: none, auto_affine (default), or affine",
+        help=(
+            "Depth calibration mode: none, auto_affine (default), or affine. "
+            "Output is emitted in semantic native/metric spaces."
+        ),
     )
     parser.add_argument(
         "--rgb-fid-backend",
@@ -853,9 +856,9 @@ def main():
 
             # Build per-modality results for saving.
             # All metric names must be fully-qualified under the declared
-            # metricNamespace.  We nest raw/aligned under depth → eval so
+            # metricNamespace. We nest semantic spaces under depth → eval so
             # every flattened path starts with "depth.eval.".
-            alignment_info = depth_results.get("alignment", {})
+            space_info = depth_results.get("space_info", {})
             depth_dataset_info = depth_results.get("dataset_info", {})
 
             depth_spatial = depth_results.get("spatial_info", {})
@@ -870,8 +873,18 @@ def main():
                 "metricSet": depth_ns.metric_set_envelope(
                     "depth",
                     metadata={
-                        "alignment_mode": alignment_info.get("mode", "unknown"),
-                        "alignment_applied": alignment_info.get("applied", False),
+                        "input_space_detected": space_info.get(
+                            "input_space_detected", "unknown"
+                        ),
+                        "metric_space_source": space_info.get("metric_space_source"),
+                        "calibration_mode": space_info.get(
+                            "calibration_mode", "unknown"
+                        ),
+                        "calibration_applied": space_info.get(
+                            "calibration_applied", False
+                        ),
+                        "emitted_spaces": space_info.get("emitted_spaces", []),
+                        "canonical_space": space_info.get("canonical_space", "metric"),
                     },
                 ),
                 "dataset_info": depth_dataset_info,
@@ -908,40 +921,46 @@ def main():
                         ),
                     },
                 }),
-                "depth": {
-                    "eval": {
-                        "raw": _clean_metric_tree(depth_results["depth_raw"]),
-                        "aligned": _clean_metric_tree(
-                            depth_results["depth_aligned"]
-                        ),
-                    },
-                },
+                "depth": {"eval": {}},
             }
+            for space_name, result_key in (
+                ("native", "depth_native"),
+                ("metric", "depth_metric"),
+            ):
+                branch = depth_results.get(result_key)
+                if branch is not None:
+                    depth_save["depth"]["eval"][space_name] = _clean_metric_tree(branch)
 
             # Inject benchmark bin metrics under the existing category
             # keys so that the bin axis decomposes correctly:
-            #   depth.eval.aligned.standard.image_mean.{bin}.absrel
-            #   depth.eval.aligned.depth_metrics.{bin}.absrel.median
-            #   depth.eval.aligned.geometric_metrics.{bin}.normal_consistency.mean_angle
+            #   depth.eval.metric.standard.image_mean.{bin}.absrel
+            #   depth.eval.metric.depth_metrics.{bin}.absrel.median
+            #   depth.eval.metric.geometric_metrics.{bin}.normal_consistency.mean_angle
             depth_benchmark = depth_results.get("depth_benchmark")
             if depth_benchmark is not None:
-                aligned = depth_save["depth"]["eval"]["aligned"]
-                for bn in ("all", "near", "mid", "far"):
-                    bin_summary = depth_benchmark.get(bn, {})
-                    for category, metrics in bin_summary.items():
-                        cleaned = _clean_metric_tree(metrics)
-                        if cleaned:
-                            if category == "standard":
-                                bucket = aligned.setdefault(category, {})
-                                for reduction, reduction_metrics in cleaned.items():
-                                    bucket.setdefault(reduction, {})[bn] = reduction_metrics
-                            else:
-                                aligned.setdefault(category, {})[bn] = cleaned
+                for space_name in ("native", "metric"):
+                    if space_name not in depth_save["depth"]["eval"]:
+                        continue
+                    space_benchmark = depth_benchmark.get(space_name)
+                    if space_benchmark is None:
+                        continue
+                    target = depth_save["depth"]["eval"][space_name]
+                    for bn in ("all", "near", "mid", "far"):
+                        bin_summary = space_benchmark.get(bn, {})
+                        for category, metrics in bin_summary.items():
+                            cleaned = _clean_metric_tree(metrics)
+                            if cleaned:
+                                if category == "standard":
+                                    bucket = target.setdefault(category, {})
+                                    for reduction, reduction_metrics in cleaned.items():
+                                        bucket.setdefault(reduction, {})[bn] = reduction_metrics
+                                else:
+                                    target.setdefault(category, {})[bn] = cleaned
                 depth_save["metricSet"]["metadata"]["benchmark"] = {
                     "depth_range": depth_benchmark["boundaries"]["range"],
                     "boundaries": depth_benchmark["boundaries"],
                 }
-            for depth_key in ("depth", "depth_raw", "depth_aligned", "depth_benchmark"):
+            for depth_key in ("depth", "depth_native", "depth_metric", "depth_benchmark"):
                 if depth_key in depth_results and depth_results[depth_key] is not None:
                     all_results[depth_key] = depth_results[depth_key]
             depth_pfm = depth_results.get("per_file_metrics", {})
@@ -949,14 +968,17 @@ def main():
                 depth_save["per_file_metrics"] = _clean_metric_tree(
                     _wrap_pfm_metrics(
                         depth_pfm,
-                        lambda m: {
-                            "depth": {
-                                "eval": {
-                                    "raw": m.get("depth_raw", {}),
-                                    "aligned": m.get("depth_aligned", {}),
+                        lambda m: (
+                            {
+                                "depth": {
+                                    "eval": {
+                                        space: m[f"depth_{space}"]
+                                        for space in ("native", "metric")
+                                        if f"depth_{space}" in m
+                                    },
                                 },
-                            },
-                        },
+                            }
+                        ),
                     )
                 )
             all_results.setdefault("per_file_metrics", {}).update(depth_pfm)

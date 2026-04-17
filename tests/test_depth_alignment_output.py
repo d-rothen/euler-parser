@@ -1,4 +1,4 @@
-"""Tests for depth raw/aligned output structure and alignment behavior."""
+"""Tests for semantic depth-space output and calibration behavior."""
 
 from pathlib import Path
 
@@ -222,7 +222,29 @@ def _make_dataset_with_segmentation():
     return _DummyDepthDataset(samples)
 
 
-def test_depth_output_contains_raw_and_aligned(monkeypatch):
+def _make_metric_dataset():
+    gt_a = np.array([[10.0, 20.0], [30.0, 40.0]], dtype=np.float32)
+    gt_b = np.array([[6.0, 12.0], [18.0, 24.0]], dtype=np.float32)
+    pred_a = (gt_a * 1.02).astype(np.float32)
+    pred_b = (gt_b * 0.98).astype(np.float32)
+    samples = [
+        {
+            "id": "00001",
+            "full_id": "/Scene01/clone/00001",
+            "gt": gt_a,
+            "pred": pred_a,
+        },
+        {
+            "id": "00002",
+            "full_id": "/Scene01/clone/00002",
+            "gt": gt_b,
+            "pred": pred_b,
+        },
+    ]
+    return _DummyDepthDataset(samples)
+
+
+def test_depth_output_contains_native_and_metric_for_calibrated_normalized_input(monkeypatch):
     _patch_depth_metrics(monkeypatch)
 
     results = eval_mod.evaluate_depth_samples(
@@ -232,36 +254,38 @@ def test_depth_output_contains_raw_and_aligned(monkeypatch):
         alignment_mode="auto_affine",
     )
 
-    assert "depth_raw" in results
-    assert "depth_aligned" in results
+    assert "depth_native" in results
+    assert "depth_metric" in results
     assert "depth" in results
 
-    raw_absrel = results["depth_raw"]["depth_metrics"]["absrel"]["median"]
-    aligned_absrel = results["depth_aligned"]["depth_metrics"]["absrel"]["median"]
-    raw_standard_absrel = results["depth_raw"]["standard"]["image_mean"]["absrel"]
-    aligned_standard_absrel = results["depth_aligned"]["standard"]["image_mean"]["absrel"]
-    assert aligned_absrel < raw_absrel
-    assert aligned_standard_absrel < raw_standard_absrel
-    assert results["alignment"]["applied"] is True
+    native_absrel = results["depth_native"]["depth_metrics"]["absrel"]["median"]
+    metric_absrel = results["depth_metric"]["depth_metrics"]["absrel"]["median"]
+    native_standard_absrel = results["depth_native"]["standard"]["image_mean"]["absrel"]
+    metric_standard_absrel = results["depth_metric"]["standard"]["image_mean"]["absrel"]
+    assert metric_absrel < native_absrel
+    assert metric_standard_absrel < native_standard_absrel
+    assert results["space_info"]["calibration_applied"] is True
+    assert results["space_info"]["emitted_spaces"] == ["native", "metric"]
+    assert results["space_info"]["canonical_space"] == "metric"
 
     files = results["per_file_metrics"]["children"]["Scene01"]["children"]["clone"][
         "files"
     ]
     per_file = next(item["metrics"] for item in files if item["id"] == "00001")
     assert "depth" in per_file
-    assert "depth_raw" in per_file
-    assert "depth_aligned" in per_file
+    assert "depth_native" in per_file
+    assert "depth_metric" in per_file
     assert (
-        per_file["depth_aligned"]["depth_metrics"]["absrel"]
-        < per_file["depth_raw"]["depth_metrics"]["absrel"]
+        per_file["depth_metric"]["depth_metrics"]["absrel"]
+        < per_file["depth_native"]["depth_metrics"]["absrel"]
     )
     assert (
-        per_file["depth_aligned"]["standard"]["absrel"]
-        < per_file["depth_raw"]["standard"]["absrel"]
+        per_file["depth_metric"]["standard"]["absrel"]
+        < per_file["depth_native"]["standard"]["absrel"]
     )
 
 
-def test_depth_alignment_none_keeps_raw_and_aligned_equal(monkeypatch):
+def test_depth_alignment_none_emits_only_native_for_normalized_input(monkeypatch):
     _patch_depth_metrics(monkeypatch)
 
     results = eval_mod.evaluate_depth_samples(
@@ -271,13 +295,34 @@ def test_depth_alignment_none_keeps_raw_and_aligned_equal(monkeypatch):
         alignment_mode="none",
     )
 
-    raw = results["depth_raw"]["depth_metrics"]["absrel"]["median"]
-    aligned = results["depth_aligned"]["depth_metrics"]["absrel"]["median"]
-    raw_standard = results["depth_raw"]["standard"]["pixel_pool"]["absrel"]
-    aligned_standard = results["depth_aligned"]["standard"]["pixel_pool"]["absrel"]
-    assert raw == aligned
-    assert raw_standard == aligned_standard
-    assert results["alignment"]["applied"] is False
+    assert "depth_native" in results and results["depth_native"] is not None
+    assert results.get("depth_metric") is None
+    assert results["depth"] == results["depth_native"]
+    assert results["space_info"]["calibration_applied"] is False
+    assert results["space_info"]["emitted_spaces"] == ["native"]
+    assert results["space_info"]["canonical_space"] == "native"
+
+
+def test_metric_input_emits_only_metric_when_no_calibration_is_needed(monkeypatch):
+    _patch_depth_metrics(monkeypatch)
+
+    results = eval_mod.evaluate_depth_samples(
+        dataset=_make_metric_dataset(),
+        is_radial=True,
+        device="cpu",
+        alignment_mode="auto_affine",
+    )
+
+    assert results.get("depth_native") is None
+    assert "depth_metric" in results and results["depth_metric"] is not None
+    assert results["depth"] == results["depth_metric"]
+    assert results["space_info"]["input_space_detected"] == "metric"
+    assert results["space_info"]["metric_space_source"] == "native"
+    assert results["space_info"]["emitted_spaces"] == ["metric"]
+    files = results["per_file_metrics"]["children"]["Scene01"]["children"]["clone"]["files"]
+    per_file = next(item["metrics"] for item in files if item["id"] == "00001")
+    assert "depth_metric" in per_file
+    assert "depth_native" not in per_file
 
 
 def test_depth_output_contains_spatial_info(monkeypatch):
