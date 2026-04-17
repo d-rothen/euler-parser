@@ -103,12 +103,13 @@ def _init_benchmark_bin_store(temp_dir: Path, prefix: str) -> dict:
 
 def _close_benchmark_stores(stores: dict) -> None:
     """Close all streaming stores in a benchmark store dict."""
-    for bin_name in _BENCHMARK_BIN_NAMES:
-        s = stores[bin_name]
-        s["absrel_store"].close()
-        s["rmse_store"].close()
-        s["silog_store"].close()
-        s["normal_store"].close()
+    for space_stores in stores.values():
+        for bin_name in _BENCHMARK_BIN_NAMES:
+            s = space_stores[bin_name]
+            s["absrel_store"].close()
+            s["rmse_store"].close()
+            s["silog_store"].close()
+            s["normal_store"].close()
 
 
 def _safe_mean_values(values: list) -> Optional[float]:
@@ -556,9 +557,9 @@ def evaluate_depth_samples(
 
     Returns:
         Dictionary containing depth aggregate/per-file metrics with:
-        ``depth_raw``, ``depth_aligned``, backward-compatible ``depth``,
-        explicit ``standard`` reducers within each depth branch, and
-        optionally ``depth_benchmark``.
+        optional ``depth_native`` and/or ``depth_metric`` semantic branches,
+        backward-compatible canonical ``depth``, and optionally
+        per-space ``depth_benchmark`` summaries.
     """
     valid_alignment_modes = {"none", "auto_affine", "affine"}
     if alignment_mode not in valid_alignment_modes:
@@ -889,12 +890,13 @@ def evaluate_depth_samples(
     logged_alignment = False
     normalized_predictions = False
     alignment_applied = False
+    input_space_detected = "unknown"
     gt_native_dims: Optional[tuple[int, int]] = None
     pred_native_dims: Optional[tuple[int, int]] = None
     spatial_method = "none"
 
     if alignment_mode == "none":
-        print("Depth alignment mode: none (raw predictions only)")
+        print("Depth alignment mode: none")
     elif alignment_mode == "auto_affine":
         print("Depth alignment mode: auto_affine (normalized-depth detection)")
     else:
@@ -932,8 +934,14 @@ def evaluate_depth_samples(
                 f"(log-scaled near/mid/far bins)"
             )
             benchmark_stores = {
-                bn: _init_benchmark_bin_store(temp_dir, f"bench_{bn}")
-                for bn in _BENCHMARK_BIN_NAMES
+                "native": {
+                    bn: _init_benchmark_bin_store(temp_dir, f"bench_native_{bn}")
+                    for bn in _BENCHMARK_BIN_NAMES
+                },
+                "metric": {
+                    bn: _init_benchmark_bin_store(temp_dir, f"bench_metric_{bn}")
+                    for bn in _BENCHMARK_BIN_NAMES
+                },
             }
 
         try:
@@ -976,21 +984,24 @@ def evaluate_depth_samples(
                     ):
                         sky_valid = align_to_prediction(sky_valid, depth_pred)
 
-                if alignment_mode == "auto_affine" and i == 0:
+                if i == 0:
                     pred_min = float(np.nanmin(depth_pred))
                     pred_max = float(np.nanmax(depth_pred))
                     if pred_max <= 1.0 + 1e-3 and pred_min >= -1.0 - 1e-3:
                         normalized_predictions = True
+                        input_space_detected = "normalized"
                         print(
-                            f"  Scale-and-shift: detected normalized predictions "
+                            f"  Detected native depth space: normalized "
                             f"(range [{pred_min:.3f}, {pred_max:.3f}])"
                         )
                     else:
+                        input_space_detected = "metric"
                         print(
-                            f"  Scale-and-shift: predictions appear metric "
-                            f"(range [{pred_min:.1f}, {pred_max:.1f}]), "
-                            f"skipping alignment"
+                            f"  Detected native depth space: metric "
+                            f"(range [{pred_min:.1f}, {pred_max:.1f}])"
                         )
+                        if alignment_mode == "auto_affine":
+                            print("  Scale-and-shift: skipping calibration")
 
                 depth_gt = process_depth(depth_gt, 1.0, is_radial, intrinsics_K)
                 depth_pred_raw = process_depth(depth_pred, 1.0, is_radial, intrinsics_K)
@@ -1066,22 +1077,28 @@ def evaluate_depth_samples(
                     _append_metrics(stores["aligned"], aligned_metrics, aligned_pred_path)
 
                 raw_value = _build_per_file_depth_value(raw_metrics)
-                aligned_value = (
+                metric_value = (
                     raw_value
                     if aligned_metrics is raw_metrics
                     else _build_per_file_depth_value(aligned_metrics)
                 )
+                emit_native = alignment_applied or normalized_predictions
+                emit_metric = alignment_applied or not normalized_predictions
+                canonical_value = metric_value if emit_metric else raw_value
+                file_metrics = {
+                    "depth": canonical_value,
+                }
+                if emit_native:
+                    file_metrics["depth_native"] = raw_value
+                if emit_metric:
+                    file_metrics["depth_metric"] = metric_value
                 set_value(
                     per_file_metrics,
                     hierarchy,
                     entry_id,
                     {
                         "id": entry_id,
-                        "metrics": {
-                            "depth": aligned_value,
-                            "depth_raw": raw_value,
-                            "depth_aligned": aligned_value,
-                        },
+                        "metrics": file_metrics,
                     },
                 )
 
@@ -1109,7 +1126,7 @@ def evaluate_depth_samples(
                         v,
                         _store=stores["aligned"],
                         _slot=aligned_lpips_slot,
-                        _per_file=aligned_value,
+                        _per_file=metric_value,
                     ):
                         val = float(v) if np.isfinite(v) else float("nan")
                         _store["lpips_values"][_slot] = val
@@ -1123,8 +1140,8 @@ def evaluate_depth_samples(
 
                 # -- Enqueue batched GPU depth metrics; callbacks patch the
                 # placeholders that _compute_branch_metrics(defer_to_batcher=True)
-                # left behind and run the deferred sanity checks on the aligned
-                # branch.
+                # left behind and run the deferred sanity checks on the
+                # canonical emitted branch.
                 if defer_depth:
                     raw_depth_slot = len(stores["raw"]["psnr_values"]) - 1
                     # When aligned == raw, there is only one enqueue; run the
@@ -1166,7 +1183,7 @@ def evaluate_depth_samples(
                             _metrics=aligned_metrics,
                             _store=stores["aligned"],
                             _slot=aligned_depth_slot,
-                            _pf=aligned_value,
+                            _pf=metric_value,
                             _sanity=sanity_checker,
                             _entry_id=entry_id,
                         ):
@@ -1185,7 +1202,7 @@ def evaluate_depth_samples(
                             _aligned_depth_cb,
                         )
 
-                # -- Benchmark depth-range metrics (aligned only) --
+                # -- Benchmark depth-range metrics per emitted semantic space --
                 if benchmark_stores is not None:
                     bm_bins = get_benchmark_depth_bins(
                         depth_gt, benchmark_depth_range[0], benchmark_depth_range[1]
@@ -1194,72 +1211,136 @@ def evaluate_depth_samples(
                         benchmark_boundaries = bm_bins["boundaries"]
 
                     for bn in _BENCHMARK_BIN_NAMES:
-                        bin_mask = bm_bins[bn].copy()
-                        bin_mask &= (depth_pred_aligned > 0) & np.isfinite(
-                            depth_pred_aligned
+                        native_bin_mask = bm_bins[bn].copy()
+                        native_bin_mask &= (depth_pred_raw > 0) & np.isfinite(
+                            depth_pred_raw
                         )
                         if sky_valid is not None:
-                            bin_mask &= sky_valid
-                        if not bin_mask.any():
-                            continue
-
-                        bm_store = benchmark_stores[bn]
-
-                        bm_absrel = compute_absrel(
-                            depth_pred_aligned, depth_gt, valid_mask=bin_mask
-                        )
-                        bm_rmse = compute_rmse_per_pixel(
-                            depth_pred_aligned, depth_gt, valid_mask=bin_mask
-                        )
-                        bm_silog_arr = compute_silog_per_pixel(
-                            depth_pred_aligned, depth_gt, valid_mask=bin_mask
-                        )
-                        bm_silog_val = compute_scale_invariant_log_error(
-                            depth_pred_aligned, depth_gt, valid_mask=bin_mask
-                        )
-                        bm_standard, bm_standard_pool = compute_standard_depth_metrics(
-                            depth_pred_aligned, depth_gt, valid_mask=bin_mask
-                        )
-                        bm_normals = compute_normal_angles(
-                            depth_pred_aligned, depth_gt, valid_mask=bin_mask
-                        )
-
-                        bm_store["absrel_store"].append(bm_absrel)
-                        bm_store["rmse_store"].append(np.sqrt(bm_rmse))
-                        bm_store["silog_store"].append(bm_silog_arr)
-                        bm_store["silog_full_values"].append(bm_silog_val)
-                        append_standard_depth_metrics(
-                            bm_store["standard_store"],
-                            bm_standard,
-                            bm_standard_pool,
-                        )
-                        bm_store["normal_store"].append(bm_normals)
-                        if len(bm_normals) > 0:
-                            bm_store["normal_below_11_25"] += int(
-                                np.sum(bm_normals < 11.25)
+                            native_bin_mask &= sky_valid
+                        if native_bin_mask.any():
+                            bm_store = benchmark_stores["native"][bn]
+                            bm_absrel = compute_absrel(
+                                depth_pred_raw, depth_gt, valid_mask=native_bin_mask
                             )
-                            bm_store["normal_below_22_5"] += int(
-                                np.sum(bm_normals < 22.5)
+                            bm_rmse = compute_rmse_per_pixel(
+                                depth_pred_raw, depth_gt, valid_mask=native_bin_mask
                             )
-                            bm_store["normal_below_30"] += int(
-                                np.sum(bm_normals < 30.0)
+                            bm_silog_arr = compute_silog_per_pixel(
+                                depth_pred_raw, depth_gt, valid_mask=native_bin_mask
                             )
+                            bm_silog_val = compute_scale_invariant_log_error(
+                                depth_pred_raw, depth_gt, valid_mask=native_bin_mask
+                            )
+                            bm_standard, bm_standard_pool = compute_standard_depth_metrics(
+                                depth_pred_raw, depth_gt, valid_mask=native_bin_mask
+                            )
+                            bm_normals = compute_normal_angles(
+                                depth_pred_raw, depth_gt, valid_mask=native_bin_mask
+                            )
+
+                            bm_store["absrel_store"].append(bm_absrel)
+                            bm_store["rmse_store"].append(np.sqrt(bm_rmse))
+                            bm_store["silog_store"].append(bm_silog_arr)
+                            bm_store["silog_full_values"].append(bm_silog_val)
+                            append_standard_depth_metrics(
+                                bm_store["standard_store"],
+                                bm_standard,
+                                bm_standard_pool,
+                            )
+                            bm_store["normal_store"].append(bm_normals)
+                            if len(bm_normals) > 0:
+                                bm_store["normal_below_11_25"] += int(
+                                    np.sum(bm_normals < 11.25)
+                                )
+                                bm_store["normal_below_22_5"] += int(
+                                    np.sum(bm_normals < 22.5)
+                                )
+                                bm_store["normal_below_30"] += int(
+                                    np.sum(bm_normals < 30.0)
+                                )
+
+                        if aligned_metrics is not raw_metrics:
+                            metric_bin_mask = bm_bins[bn].copy()
+                            metric_bin_mask &= (depth_pred_aligned > 0) & np.isfinite(
+                                depth_pred_aligned
+                            )
+                            if sky_valid is not None:
+                                metric_bin_mask &= sky_valid
+                            if metric_bin_mask.any():
+                                bm_store = benchmark_stores["metric"][bn]
+                                bm_absrel = compute_absrel(
+                                    depth_pred_aligned,
+                                    depth_gt,
+                                    valid_mask=metric_bin_mask,
+                                )
+                                bm_rmse = compute_rmse_per_pixel(
+                                    depth_pred_aligned,
+                                    depth_gt,
+                                    valid_mask=metric_bin_mask,
+                                )
+                                bm_silog_arr = compute_silog_per_pixel(
+                                    depth_pred_aligned,
+                                    depth_gt,
+                                    valid_mask=metric_bin_mask,
+                                )
+                                bm_silog_val = compute_scale_invariant_log_error(
+                                    depth_pred_aligned,
+                                    depth_gt,
+                                    valid_mask=metric_bin_mask,
+                                )
+                                bm_standard, bm_standard_pool = compute_standard_depth_metrics(
+                                    depth_pred_aligned,
+                                    depth_gt,
+                                    valid_mask=metric_bin_mask,
+                                )
+                                bm_normals = compute_normal_angles(
+                                    depth_pred_aligned,
+                                    depth_gt,
+                                    valid_mask=metric_bin_mask,
+                                )
+
+                                bm_store["absrel_store"].append(bm_absrel)
+                                bm_store["rmse_store"].append(np.sqrt(bm_rmse))
+                                bm_store["silog_store"].append(bm_silog_arr)
+                                bm_store["silog_full_values"].append(bm_silog_val)
+                                append_standard_depth_metrics(
+                                    bm_store["standard_store"],
+                                    bm_standard,
+                                    bm_standard_pool,
+                                )
+                                bm_store["normal_store"].append(bm_normals)
+                                if len(bm_normals) > 0:
+                                    bm_store["normal_below_11_25"] += int(
+                                        np.sum(bm_normals < 11.25)
+                                    )
+                                    bm_store["normal_below_22_5"] += int(
+                                        np.sum(bm_normals < 22.5)
+                                    )
+                                    bm_store["normal_below_30"] += int(
+                                        np.sum(bm_normals < 30.0)
+                                    )
 
                 if sanity_checker is not None:
+                    canonical_pred = depth_pred_aligned if (
+                        alignment_applied or not normalized_predictions
+                    ) else depth_pred_raw
+                    canonical_metrics = aligned_metrics if (
+                        alignment_applied or not normalized_predictions
+                    ) else raw_metrics
                     sanity_checker.validate_depth_input(
-                        depth_gt, depth_pred_aligned, entry_id
+                        depth_gt, canonical_pred, entry_id
                     )
                     if not defer_depth:
                         # When deferred, the batcher callback runs these.
                         _run_deferred_depth_sanity(
-                            sanity_checker, aligned_metrics, entry_id
+                            sanity_checker, canonical_metrics, entry_id
                         )
-                    nm = aligned_metrics["normal_meta"]
+                    nm = canonical_metrics["normal_meta"]
                     if nm["mean_angle"] is not None:
                         sanity_checker.validate_normal_consistency(
                             nm["mean_angle"], nm["valid_pixels_after_erosion"], entry_id
                         )
-                    ef = aligned_metrics["edge_f1"]
+                    ef = canonical_metrics["edge_f1"]
                     sanity_checker.validate_depth_edge_f1(
                         ef["pred_edge_pixels"],
                         ef["gt_edge_pixels"],
@@ -1278,28 +1359,61 @@ def evaluate_depth_samples(
             print("Computing FID/KID (this may take a while)...")
             print("Aggregating depth results...")
 
-            depth_raw = _build_depth_summary(stores["raw"], gt_depth_paths)
-            if alignment_applied:
-                depth_aligned = _build_depth_summary(stores["aligned"], gt_depth_paths)
-            else:
-                depth_aligned = copy.deepcopy(depth_raw)
+            emit_native = alignment_applied or normalized_predictions
+            emit_metric = alignment_applied or not normalized_predictions
+
+            native_summary = (
+                _build_depth_summary(stores["raw"], gt_depth_paths)
+                if emit_native or (emit_metric and not alignment_applied)
+                else None
+            )
+            metric_summary = None
+            if emit_metric:
+                if alignment_applied:
+                    metric_summary = _build_depth_summary(
+                        stores["aligned"], gt_depth_paths
+                    )
+                else:
+                    metric_summary = copy.deepcopy(native_summary)
+            depth_summary = metric_summary if emit_metric else native_summary
 
             # -- Benchmark aggregation --
             depth_benchmark = None
             if benchmark_stores is not None:
                 print("Aggregating benchmark depth results...")
-                depth_benchmark = {
-                    "boundaries": benchmark_boundaries,
-                }
-                for bn in _BENCHMARK_BIN_NAMES:
-                    depth_benchmark[bn] = _build_benchmark_bin_summary(
-                        benchmark_stores[bn]
-                    )
+                depth_benchmark = {"boundaries": benchmark_boundaries}
+                if emit_native or (emit_metric and not alignment_applied):
+                    native_benchmark = {
+                        bn: _build_benchmark_bin_summary(
+                            benchmark_stores["native"][bn]
+                        )
+                        for bn in _BENCHMARK_BIN_NAMES
+                    }
+                else:
+                    native_benchmark = None
+                if emit_native:
+                    depth_benchmark["native"] = native_benchmark
+                if emit_metric:
+                    if alignment_applied:
+                        depth_benchmark["metric"] = {
+                            bn: _build_benchmark_bin_summary(
+                                benchmark_stores["metric"][bn]
+                            )
+                            for bn in _BENCHMARK_BIN_NAMES
+                        }
+                    else:
+                        depth_benchmark["metric"] = copy.deepcopy(native_benchmark)
+
+            emitted_spaces = []
+            if emit_native:
+                emitted_spaces.append("native")
+            if emit_metric:
+                emitted_spaces.append("metric")
 
             result = {
-                "depth_raw": depth_raw,
-                "depth_aligned": depth_aligned,
-                "depth": depth_aligned,
+                "depth_native": native_summary if emit_native else None,
+                "depth_metric": metric_summary if emit_metric else None,
+                "depth": depth_summary,
                 "depth_benchmark": depth_benchmark,
                 "per_file_metrics": per_file_metrics,
                 "dataset_info": {
@@ -1307,9 +1421,17 @@ def evaluate_depth_samples(
                     "gt_name": gt_name,
                     "pred_name": pred_name,
                 },
-                "alignment": {
-                    "mode": alignment_mode,
-                    "applied": alignment_applied,
+                "space_info": {
+                    "input_space_detected": input_space_detected,
+                    "metric_space_source": (
+                        "scale_shift"
+                        if alignment_applied
+                        else ("native" if emit_metric else None)
+                    ),
+                    "calibration_mode": alignment_mode,
+                    "calibration_applied": alignment_applied,
+                    "emitted_spaces": emitted_spaces,
+                    "canonical_space": "metric" if emit_metric else "native",
                 },
                 "spatial_info": {
                     "gt_dimensions": {"height": gt_native_dims[0], "width": gt_native_dims[1]}

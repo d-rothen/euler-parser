@@ -101,7 +101,7 @@ This pre-downloads:
 | `--mask-sky` | flag | off | Mask sky regions from metrics using GT segmentation |
 | `--no-sanity-check` | flag | off | Disable sanity checking of metric configurations |
 | `--metrics-config` | `str` | auto-detect | Path to `metrics_config.json` for sanity checking |
-| `--depth-alignment` | `{none,auto_affine,affine}` | `auto_affine` | Depth alignment mode (`depth` output uses aligned branch) |
+| `--depth-alignment` | `{none,auto_affine,affine}` | `auto_affine` | Depth calibration mode; outputs are emitted in semantic `native`/`metric` spaces and `depth` aliases the canonical branch |
 | `--rgb-fid-backend` | `{builtin,clean-fid}` | `builtin` | RGB FID backend; `clean-fid` requires optional dependency |
 | `--benchmark-depth-range` | `float float` | none | Depth range `[MIN, MAX]` in meters for benchmark evaluation; computes depth and RGB metrics for pixels within this range, subdivided into log-scaled near/mid/far bins (additive to regular metrics) |
 
@@ -303,10 +303,10 @@ When `--rgb-fid-backend clean-fid` is used, `euler-eval` will honor `CLEANFID_CA
 
 ```json
 {
-  "depth_raw": { "...": "metrics without alignment" },
-  "depth_aligned": { "...": "metrics with selected alignment mode" },
+  "depth_native": { "...": "native model depth space, if diagnostically meaningful" },
+  "depth_metric": { "...": "metric depth space, if available" },
   "depth": {
-    "...": "backward-compatible alias of depth_aligned"
+    "...": "canonical alias of depth_metric when present, else depth_native"
   },
   "rgb": {
     "...": "..."
@@ -320,9 +320,9 @@ When `--rgb-fid-backend clean-fid` is used, `euler-eval` will honor `CLEANFID_CA
               {
                 "id": "frame_0001",
                 "metrics": {
-                  "depth": { "...": "aligned (alias)" },
-                  "depth_raw": { "...": "raw" },
-                  "depth_aligned": { "...": "aligned" },
+                  "depth": { "...": "canonical alias" },
+                  "depth_native": { "...": "native, when emitted" },
+                  "depth_metric": { "...": "metric, when emitted" },
                   "rgb": { "...": "..." }
                 }
               }
@@ -336,9 +336,9 @@ When `--rgb-fid-backend clean-fid` is used, `euler-eval` will honor `CLEANFID_CA
 ```
 
 For depth outputs:
-- `depth_raw`: metric-space depth without any post-hoc alignment.
-- `depth_aligned`: metric-space depth after configured alignment mode.
-- `depth`: backward-compatible alias of `depth_aligned`.
+- `depth_native`: the model's native depth space after spatial/radial preprocessing, emitted only when it is diagnostically distinct.
+- `depth_metric`: the comparable metric-depth branch. This is either the native prediction itself or the calibrated scale-shift result.
+- `depth`: canonical alias of `depth_metric` when available, otherwise `depth_native`.
 - `standard`: explicit monocular-depth metrics with three reducers:
   `image_mean`, `image_median`, and `pixel_pool`.
 

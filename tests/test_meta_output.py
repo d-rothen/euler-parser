@@ -89,7 +89,7 @@ class TestMetaBlockStructure:
                 "pred": {"dimensions": {"height": 50, "width": 100}},
                 "spatial_alignment": {"method": "resize"},
             },
-            "depth": {"eval": {"raw": {}, "aligned": {}}},
+            "depth": {"eval": {"native": {}, "metric": {}}},
         }
         cleaned = _clean_metric_tree(save_dict)
         assert "meta" in cleaned
@@ -126,16 +126,16 @@ class TestAxisDeclarations:
     """Verify axis declarations follow the metric-namespacing convention."""
 
     def test_depth_axes_structure(self):
-        """depth.eval declares alignment, category, and reduction axes."""
-        assert "alignment" in _DEPTH_EVAL_AXES
+        """depth.eval declares space, category, and reduction axes."""
+        assert "space" in _DEPTH_EVAL_AXES
         assert "category" in _DEPTH_EVAL_AXES
         assert "reduction" in _DEPTH_EVAL_AXES
 
-        alignment = _DEPTH_EVAL_AXES["alignment"]
-        assert alignment.position == 0
-        assert alignment.optional is False
-        assert "raw" in alignment.values
-        assert "aligned" in alignment.values
+        space = _DEPTH_EVAL_AXES["space"]
+        assert space.position == 0
+        assert space.optional is False
+        assert "native" in space.values
+        assert "metric" in space.values
 
         category = _DEPTH_EVAL_AXES["category"]
         assert category.position == 1
@@ -264,6 +264,6 @@ class TestMetricDescriptions:
         envelope = ns.metric_set_envelope("depth", metadata={})
         assert "axes" in envelope
         assert "metricDescriptions" in envelope
-        assert envelope["axes"]["alignment"]["position"] == 0
+        assert envelope["axes"]["space"]["position"] == 0
         assert envelope["axes"]["reduction"]["position"] == 2
         assert "psnr" in envelope["metricDescriptions"]
