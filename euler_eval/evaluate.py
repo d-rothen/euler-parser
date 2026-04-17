@@ -310,6 +310,55 @@ def _identity_collate(batch):
     return batch[0]
 
 
+_sharing_strategy_set = False
+_fd_limit_raised = False
+
+
+def _ensure_file_system_sharing() -> None:
+    """Switch torch multiprocessing to the ``file_system`` sharing strategy.
+
+    The default ``file_descriptor`` strategy hands tensor storage between
+    workers and the main process via file descriptors; long DataLoader
+    runs accumulate FDs and eventually trip ``EMFILE`` ("Too many open
+    files") mid-iteration. ``file_system`` uses ``/dev/shm`` file-backed
+    storage instead, sidestepping the FD cap. Idempotent.
+    """
+    global _sharing_strategy_set
+    if _sharing_strategy_set:
+        return
+    try:
+        import torch.multiprocessing as torch_mp
+
+        torch_mp.set_sharing_strategy("file_system")
+    except (RuntimeError, AttributeError, ValueError):
+        pass
+    _sharing_strategy_set = True
+
+
+def _raise_fd_soft_limit() -> None:
+    """Raise ``RLIMIT_NOFILE`` soft cap to the hard cap.
+
+    Belt-and-suspenders against ``EMFILE`` for environments where the
+    ``file_system`` sharing strategy is unavailable (e.g. ``/dev/shm``
+    locked down) or still insufficient under long runs. The hard cap is
+    typically much higher than the default soft cap (e.g. 65536 vs 1024)
+    and raising only within that envelope needs no privileges. Idempotent
+    and best-effort: platforms without ``resource`` silently no-op.
+    """
+    global _fd_limit_raised
+    if _fd_limit_raised:
+        return
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft < hard:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+    except (ImportError, ValueError, OSError):
+        pass
+    _fd_limit_raised = True
+
+
 def _prefetched_iter(
     dataset,
     num_workers: int,
@@ -332,6 +381,8 @@ def _prefetched_iter(
             yield i, dataset[i]
         return
 
+    _raise_fd_soft_limit()
+    _ensure_file_system_sharing()
     indices = list(range(skip, total))
     subset = Subset(dataset, indices)
     loader = DataLoader(
