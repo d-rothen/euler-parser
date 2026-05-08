@@ -1,11 +1,10 @@
 """Integration test using euler_loading's MultiModalDataset with stub data files.
 
-Creates a complete on-disk dataset structure with output.json manifests
+Creates a complete on-disk dataset structure with ds-crawler metadata artifacts
 and tiny stub files, then runs through the full pipeline:
   build dataset → extract metadata → iterate samples → convert → process
 """
 
-import json
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +12,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from ds_crawler import build_dataset_head
+from ds_crawler.artifacts import save_output_artifacts
 from euler_loading import Modality, MultiModalDataset
 
 from euler_eval.data import (
@@ -66,11 +67,25 @@ def _load_intrinsics(path: str, meta=None) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def _write_output_json(directory: Path, output_dict: dict) -> None:
-    """Write output.json at the root of a modality directory."""
-    path = directory / "output.json"
-    with open(path, "w") as f:
-        json.dump(output_dict, f)
+def _write_ds_crawler_artifacts(directory: Path, output_dict: dict) -> None:
+    """Write canonical ds-crawler metadata artifacts for a modality directory."""
+    head = build_dataset_head(
+        dataset={"name": output_dict["name"]},
+        modality={
+            "key": output_dict["type"],
+            "meta": output_dict.get("meta"),
+        },
+    )
+    output = {
+        "contract": {"kind": "dataset_index", "version": "1.0"},
+        "head_file": "dataset-head.json",
+        "head": head,
+        "generator": {"name": "tests"},
+        "indexing": {},
+        "execution": {},
+        "index": output_dict["dataset"],
+    }
+    save_output_artifacts(directory, output)
 
 
 def _make_files_list(prefix: str, ext: str, n: int) -> list[dict]:
@@ -116,12 +131,12 @@ def dataset_root(tmp_path):
     Layout::
 
         tmp_path/
-          gt_depth/    output.json + Scene01/clone/depth_*.npy
-          pred_depth/  output.json + Scene01/clone/depth_*.npy
-          gt_rgb/      output.json + Scene01/clone/rgb_*.png
-          pred_rgb/    output.json + Scene01/clone/rgb_*.png
-          calibration/ output.json + Scene01/intrinsics.npy
-          segmentation/output.json + Scene01/clone/seg_*.npy
+          gt_depth/    .ds_crawler/{dataset-head,ds-crawler,index}.json + Scene01/clone/depth_*.npy
+          pred_depth/  .ds_crawler/{dataset-head,ds-crawler,index}.json + Scene01/clone/depth_*.npy
+          gt_rgb/      .ds_crawler/{dataset-head,ds-crawler,index}.json + Scene01/clone/rgb_*.png
+          pred_rgb/    .ds_crawler/{dataset-head,ds-crawler,index}.json + Scene01/clone/rgb_*.png
+          calibration/ .ds_crawler/{dataset-head,ds-crawler,index}.json + Scene01/intrinsics.npy
+          segmentation/.ds_crawler/{dataset-head,ds-crawler,index}.json + Scene01/clone/seg_*.npy
     """
     np.random.seed(42)
 
@@ -135,7 +150,7 @@ def dataset_root(tmp_path):
     for entry in depth_files:
         arr = np.random.uniform(1000, 5000, size=(H, W)).astype(np.float32)
         np.save(gt_depth_dir / entry["path"], arr)
-    _write_output_json(
+    _write_ds_crawler_artifacts(
         gt_depth_dir,
         _build_output_json(
             "test_depth",
@@ -153,7 +168,7 @@ def dataset_root(tmp_path):
     for entry in depth_files:
         arr = np.random.uniform(1000, 5000, size=(H, W)).astype(np.float32)
         np.save(pred_depth_dir / entry["path"], arr)
-    _write_output_json(
+    _write_ds_crawler_artifacts(
         pred_depth_dir,
         _build_output_json("test_pred_depth", "depth", depth_files),
     )
@@ -167,7 +182,7 @@ def dataset_root(tmp_path):
     for entry in rgb_files:
         img = Image.fromarray(np.random.randint(0, 255, size=(H, W, 3), dtype=np.uint8))
         img.save(gt_rgb_dir / entry["path"])
-    _write_output_json(
+    _write_ds_crawler_artifacts(
         gt_rgb_dir,
         _build_output_json("test_rgb", "rgb", rgb_files, meta={"rgb_range": [0, 1]}),
     )
@@ -180,7 +195,7 @@ def dataset_root(tmp_path):
     for entry in rgb_files:
         img = Image.fromarray(np.random.randint(0, 255, size=(H, W, 3), dtype=np.uint8))
         img.save(pred_rgb_dir / entry["path"])
-    _write_output_json(
+    _write_ds_crawler_artifacts(
         pred_rgb_dir,
         _build_output_json("test_pred_rgb", "rgb", rgb_files),
     )
@@ -190,7 +205,7 @@ def dataset_root(tmp_path):
     cal_dir = tmp_path / "calibration"
     (cal_dir / "Scene01").mkdir(parents=True)
     np.save(cal_dir / "Scene01" / "intrinsics.npy", K_MATRIX)
-    _write_output_json(
+    _write_ds_crawler_artifacts(
         cal_dir,
         _build_hierarchical_output_json("test_calibration", "calibration"),
     )
@@ -206,7 +221,7 @@ def dataset_root(tmp_path):
         sky = np.zeros((H, W), dtype=bool)
         sky[0, :] = True
         np.save(seg_dir / entry["path"], sky)
-    _write_output_json(
+    _write_ds_crawler_artifacts(
         seg_dir,
         _build_output_json(
             "test_seg", "segmentation", seg_files, meta={"sky_class_id": 29}
