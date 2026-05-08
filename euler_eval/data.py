@@ -138,8 +138,54 @@ def to_numpy_mask(data: Any) -> np.ndarray:
 def to_numpy_intrinsics(data: Any) -> np.ndarray:
     """Convert intrinsics to ``(3, 3)`` float32 numpy array."""
     if isinstance(data, torch.Tensor):
-        return data.detach().cpu().numpy().astype(np.float32)
-    return np.asarray(data, dtype=np.float32)
+        arr = data.detach().cpu().numpy().astype(np.float32)
+    else:
+        arr = np.asarray(data, dtype=np.float32)
+
+    if arr.ndim == 3 and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.shape != (3, 3):
+        raise ValueError(f"Unsupported intrinsics shape {arr.shape}. Expected (3,3).")
+    return arr
+
+
+def to_numpy_extrinsics(data: Any) -> np.ndarray:
+    """Convert camera extrinsics to a ``(4, 4)`` float32 transform matrix."""
+    if isinstance(data, torch.Tensor):
+        arr = data.detach().cpu().numpy().astype(np.float32)
+    else:
+        arr = np.asarray(data, dtype=np.float32)
+
+    if arr.ndim == 3 and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.shape == (3, 4):
+        arr = np.vstack([arr, np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)])
+    if arr.shape != (4, 4):
+        raise ValueError(
+            f"Unsupported camera extrinsics shape {arr.shape}. Expected (4,4) or (3,4)."
+        )
+    return arr.astype(np.float32, copy=False)
+
+
+def to_numpy_point_cloud(data: Any) -> np.ndarray:
+    """Convert point-cloud data to ``(N, C)`` float32 numpy array.
+
+    The first three columns are interpreted as ``x, y, z`` in metres. Extra
+    columns such as intensity/ring/timestamp are preserved for callers that
+    need them, but projection utilities use only ``xyz``.
+    """
+    if isinstance(data, torch.Tensor):
+        arr = data.detach().cpu().numpy().astype(np.float32)
+    else:
+        arr = np.asarray(data, dtype=np.float32)
+
+    if arr.ndim == 3 and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.ndim != 2 or arr.shape[1] < 3:
+        raise ValueError(
+            f"Unsupported point-cloud shape {arr.shape}. Expected (N,C) with C >= 3."
+        )
+    return arr.astype(np.float32, copy=False)
 
 
 def to_numpy_directions(data: Any) -> np.ndarray:
@@ -220,6 +266,102 @@ def process_depth(
         }
         depth = convert_planar_to_radial(depth, intrinsics_dict)
     return depth.astype(np.float32)
+
+
+def project_point_cloud_to_depth_map(
+    point_cloud: np.ndarray,
+    intrinsics_K: np.ndarray,
+    camera_extrinsics: np.ndarray,
+    image_shape: tuple[int, int],
+) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
+    """Project a sparse point cloud into the camera image plane.
+
+    Args:
+        point_cloud: ``(N, C)`` array whose first three columns are source-frame
+            ``x, y, z`` coordinates in metres.
+        intrinsics_K: Camera intrinsics matrix.
+        camera_extrinsics: Source-to-camera transform. For MUSES this is the
+            ``lidar2rgb`` transform returned by the ``camera_extrinsics`` loader.
+        image_shape: Target dense prediction shape as ``(height, width)``.
+
+    Returns:
+        ``(depth_map, valid_mask, metadata)``. ``depth_map`` stores radial
+        camera depth in metres at projected pixels, choosing the nearest point
+        by camera ``z`` when multiple points land on the same pixel.
+    """
+    height, width = image_shape
+    depth = np.zeros((height, width), dtype=np.float32)
+    valid_mask = np.zeros((height, width), dtype=bool)
+
+    xyz = np.asarray(point_cloud[:, :3], dtype=np.float32)
+    finite_xyz = np.isfinite(xyz).all(axis=1)
+    if not finite_xyz.any():
+        return depth, valid_mask, {
+            "input_points": int(point_cloud.shape[0]),
+            "finite_points": 0,
+            "in_front_points": 0,
+            "in_image_points": 0,
+            "projected_pixels": 0,
+        }
+
+    xyz = xyz[finite_xyz]
+    ones = np.ones((xyz.shape[0], 1), dtype=np.float32)
+    points_h = np.concatenate([xyz, ones], axis=1)
+    camera_points = (camera_extrinsics @ points_h.T).T[:, :3]
+
+    finite_camera = np.isfinite(camera_points).all(axis=1)
+    in_front = finite_camera & (camera_points[:, 2] > 1e-8)
+    if not in_front.any():
+        return depth, valid_mask, {
+            "input_points": int(point_cloud.shape[0]),
+            "finite_points": int(finite_xyz.sum()),
+            "in_front_points": 0,
+            "in_image_points": 0,
+            "projected_pixels": 0,
+        }
+
+    camera_points = camera_points[in_front]
+    z = camera_points[:, 2]
+    x = camera_points[:, 0]
+    y = camera_points[:, 1]
+
+    u = intrinsics_K[0, 0] * (x / z) + intrinsics_K[0, 2]
+    v = intrinsics_K[1, 1] * (y / z) + intrinsics_K[1, 2]
+    u_px = np.rint(u).astype(np.int64)
+    v_px = np.rint(v).astype(np.int64)
+    in_image = (u_px >= 0) & (u_px < width) & (v_px >= 0) & (v_px < height)
+    if not in_image.any():
+        return depth, valid_mask, {
+            "input_points": int(point_cloud.shape[0]),
+            "finite_points": int(finite_xyz.sum()),
+            "in_front_points": int(in_front.sum()),
+            "in_image_points": 0,
+            "projected_pixels": 0,
+        }
+
+    camera_points = camera_points[in_image]
+    z = z[in_image]
+    u_px = u_px[in_image]
+    v_px = v_px[in_image]
+    radial_depth = np.linalg.norm(camera_points, axis=1).astype(np.float32)
+    flat = v_px * width + u_px
+
+    order = np.lexsort((z, flat))
+    sorted_flat = flat[order]
+    keep = np.concatenate([[True], sorted_flat[1:] != sorted_flat[:-1]])
+    chosen = order[keep]
+    chosen_flat = flat[chosen]
+
+    depth.reshape(-1)[chosen_flat] = radial_depth[chosen]
+    valid_mask.reshape(-1)[chosen_flat] = True
+
+    return depth, valid_mask, {
+        "input_points": int(point_cloud.shape[0]),
+        "finite_points": int(finite_xyz.sum()),
+        "in_front_points": int(in_front.sum()),
+        "in_image_points": int(in_image.sum()),
+        "projected_pixels": int(chosen_flat.size),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -465,6 +607,50 @@ def build_depth_eval_dataset(
     )
 
 
+def build_sparse_depth_eval_dataset(
+    gt_sparse_depth_path: str,
+    pred_depth_path: str,
+    intrinsics_path: str,
+    camera_extrinsics_path: str,
+    segmentation_path: Optional[str] = None,
+    gt_sparse_depth_split: Optional[str] = None,
+    pred_depth_split: Optional[str] = None,
+    intrinsics_split: Optional[str] = None,
+    camera_extrinsics_split: Optional[str] = None,
+    segmentation_split: Optional[str] = None,
+) -> MultiModalDataset:
+    """Build a MultiModalDataset for sparse pointcloud depth evaluation.
+
+    The returned dataset yields dense predicted depth under ``"pred"``,
+    sparse GT point clouds under ``"gt"``, and hierarchical camera
+    calibration under ``"intrinsics"`` and ``"camera_extrinsics"``.
+    """
+    modalities = {
+        "gt": Modality(path=gt_sparse_depth_path, split=gt_sparse_depth_split),
+        "pred": Modality(path=pred_depth_path, used_as="output", split=pred_depth_split),
+    }
+
+    hierarchical = {
+        "intrinsics": Modality(path=intrinsics_path, split=intrinsics_split),
+        "camera_extrinsics": Modality(
+            path=camera_extrinsics_path,
+            split=camera_extrinsics_split,
+        ),
+    }
+    if segmentation_path is not None:
+        sky_fn = _resolve_sky_mask_loader(segmentation_path)
+        hierarchical["segmentation"] = Modality(
+            path=segmentation_path,
+            loader=sky_fn,
+            split=segmentation_split,
+        )
+
+    return MultiModalDataset(
+        modalities=modalities,
+        hierarchical_modalities=hierarchical,
+    )
+
+
 def build_rgb_eval_dataset(
     gt_rgb_path: str,
     pred_rgb_path: str,
@@ -533,6 +719,20 @@ def get_depth_metadata(dataset: MultiModalDataset) -> dict[str, Any]:
         # euler_loading is expected to return depth in metres.
         "scale_to_meters": 1.0,
         "radial_depth": bool(meta.get("radial_depth", True)),
+    }
+
+
+def get_sparse_depth_metadata(dataset: MultiModalDataset) -> dict[str, Any]:
+    """Extract sparse GT and dense prediction metadata for sparse-depth eval."""
+    sparse_meta = dataset.get_modality_metadata("gt")
+    pred_meta = dataset.get_modality_metadata("pred")
+
+    return {
+        "scale_to_meters": 1.0,
+        "representation": sparse_meta.get("representation", "point_cloud"),
+        "coordinate_unit": sparse_meta.get("coordinate_unit", "meters"),
+        "point_columns": sparse_meta.get("columns"),
+        "pred_radial_depth": bool(pred_meta.get("radial_depth", True)),
     }
 
 

@@ -3,7 +3,7 @@
 import json
 import pytest
 
-from main import load_config, validate_dataset_entry, validate_gt_config
+from euler_eval.cli import load_config, validate_dataset_entry, validate_gt_config
 
 
 # ---------------------------------------------------------------------------
@@ -38,19 +38,34 @@ class TestValidateGtConfig:
         }
         validate_gt_config(gt)
 
-    def test_missing_rgb(self, tmp_path):
+    def test_depth_only_gt_is_valid(self, tmp_path):
         depth_path = tmp_path / "depth"
         depth_path.mkdir()
         gt = {"depth": {"path": str(depth_path)}}
-        with pytest.raises(ValueError, match="gt.rgb.path"):
-            validate_gt_config(gt)
+        validate_gt_config(gt)
 
-    def test_missing_depth(self, tmp_path):
+    def test_rgb_only_gt_is_valid(self, tmp_path):
         rgb_path = tmp_path / "rgb"
         rgb_path.mkdir()
         gt = {"rgb": {"path": str(rgb_path)}}
-        with pytest.raises(ValueError, match="gt.depth.path"):
+        validate_gt_config(gt)
+
+    def test_sparse_depth_requires_projection_modalities(self, tmp_path):
+        sparse_path = tmp_path / "sparse_depth"
+        sparse_path.mkdir()
+        gt = {"sparse_depth": {"path": str(sparse_path)}}
+        with pytest.raises(ValueError, match="gt.intrinsics.path"):
             validate_gt_config(gt)
+
+    def test_sparse_depth_gt_is_valid_with_projection_modalities(self, tmp_path):
+        for name in ("sparse_depth", "intrinsics", "camera_extrinsics"):
+            (tmp_path / name).mkdir()
+        gt = {
+            "sparse_depth": {"path": str(tmp_path / "sparse_depth")},
+            "intrinsics": {"path": str(tmp_path / "intrinsics")},
+            "camera_extrinsics": {"path": str(tmp_path / "camera_extrinsics")},
+        }
+        validate_gt_config(gt)
 
     def test_nonexistent_path(self, tmp_path):
         rgb_path = tmp_path / "rgb"

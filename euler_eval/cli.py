@@ -18,11 +18,18 @@ from .data import (
     build_depth_eval_dataset,
     build_rays_eval_dataset,
     build_rgb_eval_dataset,
+    build_sparse_depth_eval_dataset,
     get_depth_metadata,
     get_rays_metadata,
     get_rgb_metadata,
+    get_sparse_depth_metadata,
 )
-from .evaluate import evaluate_depth_samples, evaluate_rays_samples, evaluate_rgb_samples
+from .evaluate import (
+    evaluate_depth_samples,
+    evaluate_rays_samples,
+    evaluate_rgb_samples,
+    evaluate_sparse_depth_samples,
+)
 from .sanity_checker import SanityChecker
 
 try:
@@ -77,6 +84,13 @@ _DEPTH_REDUCTION_AXIS = AxisDeclaration(
     description="Dataset reduction mode",
 )
 
+_SPARSE_DEPTH_CATEGORY_AXIS = AxisDeclaration(
+    position=1,
+    values=("standard", "depth_metrics"),
+    optional=True,
+    description="Sparse depth metric category",
+)
+
 _BENCHMARK_BIN_AXIS = AxisDeclaration(
     position=3,
     values=("all", "near", "mid", "far"),
@@ -109,6 +123,17 @@ def _depth_eval_axes(*, benchmark: bool = False) -> dict[str, AxisDeclaration]:
     axes = {
         "space": _DEPTH_SPACE_AXIS,
         "category": _DEPTH_CATEGORY_AXIS,
+        "reduction": _DEPTH_REDUCTION_AXIS,
+    }
+    if benchmark:
+        axes["bin"] = _BENCHMARK_BIN_AXIS
+    return axes
+
+
+def _sparse_depth_eval_axes(*, benchmark: bool = False) -> dict[str, AxisDeclaration]:
+    axes = {
+        "space": _DEPTH_SPACE_AXIS,
+        "category": _SPARSE_DEPTH_CATEGORY_AXIS,
         "reduction": _DEPTH_REDUCTION_AXIS,
     }
     if benchmark:
@@ -234,6 +259,31 @@ _DEPTH_EVAL_DESCRIPTIONS = {
     "depth_edge_f1.f1": MetricDescription(
         is_higher_better=True, min_value=0.0, max_value=1.0, display_name="Edge F1"
     ),
+}
+
+_SPARSE_DEPTH_EVAL_DESCRIPTIONS = {
+    key: value
+    for key, value in _DEPTH_EVAL_DESCRIPTIONS.items()
+    if key
+    in {
+        "absrel",
+        "sqrel",
+        "mae",
+        "rmse",
+        "rmse_log",
+        "log10",
+        "silog",
+        "delta1",
+        "delta2",
+        "delta3",
+        "absrel.median",
+        "absrel.p90",
+        "rmse.median",
+        "rmse.p90",
+        "silog.mean",
+        "silog.median",
+        "silog.p90",
+    }
 }
 
 _RGB_EVAL_DESCRIPTIONS = {
@@ -419,14 +469,35 @@ def validate_gt_config(gt: dict) -> None:
     """
     has_rgb = "rgb" in gt and "path" in gt.get("rgb", {})
     has_depth = "depth" in gt and "path" in gt.get("depth", {})
+    has_sparse_depth = "sparse_depth" in gt and "path" in gt.get("sparse_depth", {})
     has_rays = "rays" in gt and "path" in gt.get("rays", {})
+    has_intrinsics = "intrinsics" in gt and "path" in gt.get("intrinsics", {})
+    has_camera_extrinsics = (
+        "camera_extrinsics" in gt and "path" in gt.get("camera_extrinsics", {})
+    )
 
-    if not has_rgb and not has_depth and not has_rays:
+    if not has_rgb and not has_depth and not has_sparse_depth and not has_rays:
         raise ValueError(
-            "gt must have at least one of 'rgb.path', 'depth.path', or 'rays.path'"
+            "gt must have at least one of 'rgb.path', 'depth.path', "
+            "'sparse_depth.path', or 'rays.path'"
         )
 
-    for modality in ("rgb", "depth", "rays", "segmentation", "calibration"):
+    if has_sparse_depth and (not has_intrinsics or not has_camera_extrinsics):
+        raise ValueError(
+            "gt.sparse_depth requires gt.intrinsics.path and "
+            "gt.camera_extrinsics.path for pointcloud projection"
+        )
+
+    for modality in (
+        "rgb",
+        "depth",
+        "sparse_depth",
+        "rays",
+        "segmentation",
+        "calibration",
+        "intrinsics",
+        "camera_extrinsics",
+    ):
         if modality in gt and "path" in gt[modality]:
             p = Path(gt[modality]["path"])
             if not p.exists():
@@ -775,16 +846,22 @@ def main():
 
     gt = config["gt"]
     gt_depth_path = gt.get("depth", {}).get("path")
+    gt_sparse_depth_path = gt.get("sparse_depth", {}).get("path")
     gt_rgb_path = gt.get("rgb", {}).get("path")
     gt_rays_path = gt.get("rays", {}).get("path")
     calibration_path = gt.get("calibration", {}).get("path")
+    intrinsics_path = gt.get("intrinsics", {}).get("path")
+    camera_extrinsics_path = gt.get("camera_extrinsics", {}).get("path")
     segmentation_path = (
         gt.get("segmentation", {}).get("path") if args.mask_sky else None
     )
     gt_depth_split = gt.get("depth", {}).get("split")
+    gt_sparse_depth_split = gt.get("sparse_depth", {}).get("split")
     gt_rgb_split = gt.get("rgb", {}).get("split")
     gt_rays_split = gt.get("rays", {}).get("split")
     calibration_split = gt.get("calibration", {}).get("split")
+    intrinsics_split = gt.get("intrinsics", {}).get("split")
+    camera_extrinsics_split = gt.get("camera_extrinsics", {}).get("split")
     segmentation_split = (
         gt.get("segmentation", {}).get("split") if args.mask_sky else None
     )
@@ -809,7 +886,12 @@ def main():
 
         # -- Depth evaluation --
         depth_dataset = None
-        if has_depth and not args.skip_depth:
+        if (
+            has_depth
+            and gt_depth_path
+            and not gt_sparse_depth_path
+            and not args.skip_depth
+        ):
             pred_depth_path = dataset_config["depth"]["path"]
             pred_depth_split = dataset_config["depth"].get("split")
             print(f"\n[DEPTH] Evaluating: '{ds_name}'")
@@ -987,6 +1069,202 @@ def main():
                 {k: v for k, v in depth_results.items()
                  if k not in ("per_file_metrics", "spatial_info")},
                 f"DEPTH: {ds_name}",
+            )
+
+        # -- Sparse pointcloud depth evaluation --
+        sparse_depth_dataset = None
+        if has_depth and gt_sparse_depth_path and not args.skip_depth:
+            pred_depth_path = dataset_config["depth"]["path"]
+            pred_depth_split = dataset_config["depth"].get("split")
+            print(f"\n[SPARSE_DEPTH] Evaluating: '{ds_name}'")
+            print(f"  GT sparse pointcloud: {gt_sparse_depth_path}")
+            print(f"  Pred dense depth:     {pred_depth_path}")
+            print(f"  Intrinsics:           {intrinsics_path}")
+            print(f"  Camera extrinsics:    {camera_extrinsics_path}")
+
+            sparse_depth_dataset = build_sparse_depth_eval_dataset(
+                gt_sparse_depth_path=gt_sparse_depth_path,
+                pred_depth_path=pred_depth_path,
+                intrinsics_path=intrinsics_path,
+                camera_extrinsics_path=camera_extrinsics_path,
+                segmentation_path=segmentation_path,
+                gt_sparse_depth_split=gt_sparse_depth_split,
+                pred_depth_split=pred_depth_split,
+                intrinsics_split=intrinsics_split,
+                camera_extrinsics_split=camera_extrinsics_split,
+                segmentation_split=segmentation_split,
+            )
+            et_eval_datasets["sparse_depth"] = sparse_depth_dataset
+
+            sparse_depth_meta = get_sparse_depth_metadata(sparse_depth_dataset)
+            print(f"  pred_radial_depth: {sparse_depth_meta['pred_radial_depth']}")
+            print(f"  Matched pairs: {len(sparse_depth_dataset)}")
+
+            sparse_depth_results = evaluate_sparse_depth_samples(
+                dataset=sparse_depth_dataset,
+                pred_is_radial=sparse_depth_meta["pred_radial_depth"],
+                gt_name=gt.get("name", "GT"),
+                pred_name=ds_name,
+                num_workers=args.num_workers,
+                verbose=args.verbose,
+                sanity_checker=sanity_checker,
+                sky_mask_enabled=args.mask_sky,
+                alignment_mode=args.depth_alignment,
+                benchmark_depth_range=(
+                    tuple(args.benchmark_depth_range)
+                    if args.benchmark_depth_range
+                    else None
+                ),
+            )
+
+            if sanity_checker is not None:
+                sanity_checker.print_pair_report(ds_name, is_depth=True)
+
+            space_info = sparse_depth_results.get("space_info", {})
+            sparse_depth_dataset_info = sparse_depth_results.get("dataset_info", {})
+            sparse_depth_spatial = sparse_depth_results.get("spatial_info", {})
+            sparse_depth_ns = _EvalNamespace(
+                producer="euler-eval",
+                producer_version=_get_version(),
+                modalities=("sparse_depth",),
+                axes=_sparse_depth_eval_axes(benchmark=has_benchmark),
+                descriptions=_SPARSE_DEPTH_EVAL_DESCRIPTIONS,
+            )
+            depth_save = {
+                "metricSet": sparse_depth_ns.metric_set_envelope(
+                    "sparse_depth",
+                    metadata={
+                        "input_space_detected": space_info.get(
+                            "input_space_detected", "unknown"
+                        ),
+                        "metric_space_source": space_info.get("metric_space_source"),
+                        "calibration_mode": space_info.get(
+                            "calibration_mode", "unknown"
+                        ),
+                        "calibration_applied": space_info.get(
+                            "calibration_applied", False
+                        ),
+                        "emitted_spaces": space_info.get("emitted_spaces", []),
+                        "canonical_space": space_info.get("canonical_space", "metric"),
+                    },
+                ),
+                "dataset_info": sparse_depth_dataset_info,
+                "meta": _clean_metric_tree({
+                    "version": _get_version(),
+                    "modality": "sparse_depth",
+                    "device": args.device,
+                    "gt": {
+                        "path": gt_sparse_depth_path,
+                        "split": gt_sparse_depth_split,
+                        "representation": "point_cloud",
+                    },
+                    "pred": {
+                        "path": pred_depth_path,
+                        "split": pred_depth_split,
+                        "dimensions": sparse_depth_spatial.get("pred_dimensions"),
+                    },
+                    "calibration": {
+                        "intrinsics_path": intrinsics_path,
+                        "intrinsics_split": intrinsics_split,
+                        "camera_extrinsics_path": camera_extrinsics_path,
+                        "camera_extrinsics_split": camera_extrinsics_split,
+                    },
+                    "spatial_alignment": {
+                        "method": sparse_depth_spatial.get(
+                            "method", "pointcloud_projection"
+                        ),
+                        "evaluated_dimensions": sparse_depth_spatial.get(
+                            "evaluated_dimensions"
+                        ),
+                    },
+                    "modality_params": sparse_depth_meta,
+                    "eval_params": {
+                        "sky_masking": args.mask_sky,
+                        "depth_alignment_mode": args.depth_alignment,
+                        "num_workers": args.num_workers,
+                        "benchmark_depth_range": (
+                            list(args.benchmark_depth_range)
+                            if args.benchmark_depth_range
+                            else None
+                        ),
+                    },
+                }),
+                "sparse_depth": {"eval": {}},
+            }
+            for space_name, result_key in (
+                ("native", "sparse_depth_native"),
+                ("metric", "sparse_depth_metric"),
+            ):
+                branch = sparse_depth_results.get(result_key)
+                if branch is not None:
+                    depth_save["sparse_depth"]["eval"][space_name] = (
+                        _clean_metric_tree(branch)
+                    )
+
+            sparse_depth_benchmark = sparse_depth_results.get("sparse_depth_benchmark")
+            if sparse_depth_benchmark is not None:
+                for space_name in ("native", "metric"):
+                    if space_name not in depth_save["sparse_depth"]["eval"]:
+                        continue
+                    space_benchmark = sparse_depth_benchmark.get(space_name)
+                    if space_benchmark is None:
+                        continue
+                    target = depth_save["sparse_depth"]["eval"][space_name]
+                    for bn in ("all", "near", "mid", "far"):
+                        bin_summary = space_benchmark.get(bn, {})
+                        for category, metrics in bin_summary.items():
+                            cleaned = _clean_metric_tree(metrics)
+                            if cleaned:
+                                if category == "standard":
+                                    bucket = target.setdefault(category, {})
+                                    for reduction, reduction_metrics in cleaned.items():
+                                        bucket.setdefault(reduction, {})[bn] = (
+                                            reduction_metrics
+                                        )
+                                else:
+                                    target.setdefault(category, {})[bn] = cleaned
+                depth_save["metricSet"]["metadata"]["benchmark"] = {
+                    "depth_range": sparse_depth_benchmark["boundaries"]["range"],
+                    "boundaries": sparse_depth_benchmark["boundaries"],
+                }
+            for depth_key in (
+                "sparse_depth",
+                "sparse_depth_native",
+                "sparse_depth_metric",
+                "sparse_depth_benchmark",
+            ):
+                if (
+                    depth_key in sparse_depth_results
+                    and sparse_depth_results[depth_key] is not None
+                ):
+                    all_results[depth_key] = sparse_depth_results[depth_key]
+            sparse_depth_pfm = sparse_depth_results.get("per_file_metrics", {})
+            if sparse_depth_pfm:
+                depth_save["per_file_metrics"] = _clean_metric_tree(
+                    _wrap_pfm_metrics(
+                        sparse_depth_pfm,
+                        lambda m: (
+                            {
+                                "sparse_depth": {
+                                    "eval": {
+                                        space: m[f"sparse_depth_{space}"]
+                                        for space in ("native", "metric")
+                                        if f"sparse_depth_{space}" in m
+                                    },
+                                },
+                            }
+                        ),
+                    )
+                )
+            all_results.setdefault("per_file_metrics", {}).update(sparse_depth_pfm)
+
+            print_results(
+                {
+                    k: v
+                    for k, v in sparse_depth_results.items()
+                    if k not in ("per_file_metrics", "spatial_info")
+                },
+                f"SPARSE_DEPTH: {ds_name}",
             )
 
         # -- RGB evaluation --
@@ -1240,7 +1518,8 @@ def main():
         # Save per-modality results to respective dataset paths
         if depth_save:
             depth_out = save_results(depth_save, dataset_config, modality="depth")
-            print(f"\n  Depth results saved to: {depth_out}")
+            depth_label = "Sparse depth" if "sparse_depth" in depth_save else "Depth"
+            print(f"\n  {depth_label} results saved to: {depth_out}")
         if rgb_save:
             rgb_out = save_results(rgb_save, dataset_config, modality="rgb")
             print(f"\n  RGB results saved to: {rgb_out}")

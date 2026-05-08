@@ -21,10 +21,13 @@ from .data import (
     classify_spatial_alignment,
     compute_scale_and_shift,
     process_depth,
+    project_point_cloud_to_depth_map,
     to_numpy_depth,
     to_numpy_directions,
+    to_numpy_extrinsics,
     to_numpy_intrinsics,
     to_numpy_mask,
+    to_numpy_point_cloud,
     to_numpy_rgb,
 )
 from .sanity_checker import SanityChecker
@@ -485,18 +488,35 @@ def _get_sky_mask(sample: dict) -> Optional[np.ndarray]:
     return ~sky  # invert: True = non-sky = valid
 
 
+def _get_first_hierarchical_value(sample: dict, key: str):
+    data = sample.get(key)
+    if data is None:
+        return None
+    if isinstance(data, dict):
+        if not data:
+            return None
+        return next(iter(data.values()))
+    return data
+
+
 def _get_intrinsics_K(sample: dict) -> Optional[np.ndarray]:
     """Extract (3,3) intrinsics matrix from sample calibration data."""
-    cal = sample.get("calibration")
-    if cal is None:
+    K_data = _get_first_hierarchical_value(sample, "intrinsics")
+    if K_data is None:
+        K_data = _get_first_hierarchical_value(sample, "calibration")
+    if K_data is None:
         return None
-    if isinstance(cal, dict):
-        if not cal:
-            return None
-        K_data = next(iter(cal.values()))
-    else:
-        K_data = cal
     return to_numpy_intrinsics(K_data)
+
+
+def _get_camera_extrinsics(sample: dict) -> Optional[np.ndarray]:
+    """Extract a source-to-camera extrinsics matrix from a sample."""
+    T_data = _get_first_hierarchical_value(sample, "camera_extrinsics")
+    if T_data is None:
+        T_data = _get_first_hierarchical_value(sample, "extrinsics")
+    if T_data is None:
+        return None
+    return to_numpy_extrinsics(T_data)
 
 
 # ---------------------------------------------------------------------------
@@ -1458,6 +1478,532 @@ def evaluate_depth_samples(
                 branch_store["normal_store"].close()
             if benchmark_stores is not None:
                 _close_benchmark_stores(benchmark_stores)
+
+
+# ---------------------------------------------------------------------------
+# Sparse pointcloud depth evaluation
+# ---------------------------------------------------------------------------
+
+
+def evaluate_sparse_depth_samples(
+    dataset: MultiModalDataset,
+    pred_is_radial: bool,
+    gt_name: str = "GT",
+    pred_name: str = "Pred",
+    num_workers: int = 4,
+    verbose: bool = False,
+    sanity_checker: Optional[SanityChecker] = None,
+    sky_mask_enabled: bool = False,
+    alignment_mode: str = "auto_affine",
+    benchmark_depth_range: Optional[tuple[float, float]] = None,
+) -> dict:
+    """Evaluate dense depth predictions against sparse pointcloud GT.
+
+    Sparse GT points are transformed into the camera frame, projected into the
+    dense prediction image plane, and metrics are computed only at projected
+    valid pixels. The emitted metric categories intentionally exclude dense
+    image/geometric metrics such as SSIM, LPIPS, FID, normals, and edge F1.
+    """
+    valid_alignment_modes = {"none", "auto_affine", "affine"}
+    if alignment_mode not in valid_alignment_modes:
+        raise ValueError(
+            f"Invalid alignment_mode '{alignment_mode}'. "
+            f"Expected one of {sorted(valid_alignment_modes)}."
+        )
+
+    num_samples = len(dataset)
+    if num_samples == 0:
+        raise ValueError("Dataset has no matched samples")
+
+    def _init_sparse_store(temp_dir: Path, name: str) -> dict:
+        return {
+            "silog_full_values": [],
+            "pred_depth_paths": [],
+            "absrel_store": _StreamingValueStore(str(temp_dir / f"{name}_absrel.bin")),
+            "rmse_store": _StreamingValueStore(str(temp_dir / f"{name}_rmse.bin")),
+            "silog_store": _StreamingValueStore(str(temp_dir / f"{name}_silog.bin")),
+            "standard_store": init_standard_depth_store(),
+        }
+
+    def _compute_sparse_metrics(
+        depth_gt: np.ndarray,
+        depth_pred: np.ndarray,
+        valid_mask: np.ndarray,
+    ) -> dict:
+        standard_metrics, standard_pool_stats = compute_standard_depth_metrics(
+            depth_pred, depth_gt, valid_mask=valid_mask
+        )
+        absrel_arr, absrel_meta = compute_absrel(
+            depth_pred, depth_gt, valid_mask=valid_mask, return_metadata=True
+        )
+        rmse_arr = compute_rmse_per_pixel(depth_pred, depth_gt, valid_mask=valid_mask)
+        silog_arr = compute_silog_per_pixel(depth_pred, depth_gt, valid_mask=valid_mask)
+        silog_val = compute_scale_invariant_log_error(
+            depth_pred, depth_gt, valid_mask=valid_mask
+        )
+        return {
+            "absrel_arr": absrel_arr,
+            "absrel_meta": absrel_meta,
+            "rmse_arr": rmse_arr,
+            "silog_arr": silog_arr,
+            "silog_full": silog_val,
+            "standard_metrics": standard_metrics,
+            "standard_pool_stats": standard_pool_stats,
+            "valid_pixel_count": int(valid_mask.sum()),
+        }
+
+    def _append_sparse_metrics(store: dict, metrics: dict, pred_depth_path: str) -> None:
+        store["silog_full_values"].append(metrics["silog_full"])
+        store["pred_depth_paths"].append(pred_depth_path)
+        append_standard_depth_metrics(
+            store["standard_store"],
+            metrics["standard_metrics"],
+            metrics["standard_pool_stats"],
+        )
+        store["absrel_store"].append(metrics["absrel_arr"])
+        store["rmse_store"].append(np.sqrt(metrics["rmse_arr"]))
+        store["silog_store"].append(metrics["silog_arr"])
+
+    def _build_sparse_valid_mask(
+        depth_gt: np.ndarray,
+        depth_pred: np.ndarray,
+        sparse_mask: np.ndarray,
+        sky_valid: Optional[np.ndarray],
+    ) -> np.ndarray:
+        valid_mask = (
+            sparse_mask
+            & (depth_gt > 0)
+            & (depth_pred > 0)
+            & np.isfinite(depth_gt)
+            & np.isfinite(depth_pred)
+        )
+        if sky_valid is not None:
+            valid_mask &= sky_valid
+        return valid_mask
+
+    def _safe_mean(values: list[float]) -> Optional[float]:
+        valid = [float(v) for v in values if np.isfinite(v)]
+        if not valid:
+            return None
+        return float(np.mean(valid))
+
+    def _build_sparse_summary(store: dict) -> dict:
+        absrel_median, absrel_p90 = store["absrel_store"].quantiles([0.5, 0.9])
+        rmse_median, rmse_p90 = store["rmse_store"].quantiles([0.5, 0.9])
+        silog_median, silog_p90 = store["silog_store"].quantiles([0.5, 0.9])
+        return {
+            "standard": summarize_standard_depth_store(store["standard_store"]),
+            "depth_metrics": {
+                "absrel": {"median": absrel_median, "p90": absrel_p90},
+                "rmse": {"median": rmse_median, "p90": rmse_p90},
+                "silog": {
+                    "mean": _safe_mean(store["silog_full_values"]),
+                    "median": silog_median,
+                    "p90": silog_p90,
+                },
+            },
+        }
+
+    def _build_per_file_sparse_value(metrics: dict) -> dict:
+        absrel_arr = metrics["absrel_arr"]
+        rmse_arr = metrics["rmse_arr"]
+        return {
+            "standard": {
+                key: float(value) if np.isfinite(value) else None
+                for key, value in metrics["standard_metrics"].items()
+            },
+            "depth_metrics": {
+                "absrel": float(np.mean(absrel_arr)) if len(absrel_arr) > 0 else None,
+                "rmse": (
+                    float(np.sqrt(np.mean(rmse_arr))) if len(rmse_arr) > 0 else None
+                ),
+                "silog": (
+                    float(metrics["silog_full"])
+                    if np.isfinite(metrics["silog_full"])
+                    else None
+                ),
+            },
+        }
+
+    logged_stats = False
+    normalized_predictions = False
+    alignment_applied = False
+    input_space_detected = "unknown"
+    pred_native_dims: Optional[tuple[int, int]] = None
+    total_input_points = 0
+    total_projected_pixels = 0
+    total_evaluated_pixels = 0
+
+    if alignment_mode == "none":
+        print("Sparse depth alignment mode: none")
+    elif alignment_mode == "auto_affine":
+        print("Sparse depth alignment mode: auto_affine (normalized-depth detection)")
+    else:
+        print("Sparse depth alignment mode: affine (always apply scale-and-shift)")
+
+    with tempfile.TemporaryDirectory(prefix="euler_eval_sparse_depth_") as temp_dir_str:
+        temp_dir = Path(temp_dir_str)
+        raw_pred_dir = temp_dir / "raw_pred"
+        aligned_pred_dir = temp_dir / "aligned_pred"
+        raw_pred_dir.mkdir()
+        aligned_pred_dir.mkdir()
+
+        stores = {
+            "raw": _init_sparse_store(temp_dir, "raw"),
+            "aligned": _init_sparse_store(temp_dir, "aligned"),
+        }
+        per_file_metrics = {}
+
+        benchmark_stores = None
+        benchmark_boundaries = None
+        if benchmark_depth_range is not None:
+            bm_min, bm_max = benchmark_depth_range
+            print(
+                f"Sparse benchmark depth range: [{bm_min}, {bm_max}] meters "
+                f"(square-root-scaled near/mid/far bins)"
+            )
+            benchmark_stores = {
+                "native": {
+                    bn: _init_sparse_store(temp_dir, f"bench_native_{bn}")
+                    for bn in _BENCHMARK_BIN_NAMES
+                },
+                "metric": {
+                    bn: _init_sparse_store(temp_dir, f"bench_metric_{bn}")
+                    for bn in _BENCHMARK_BIN_NAMES
+                },
+            }
+
+        try:
+            print("Computing sparse pointcloud depth metrics...")
+            depth_iter = _prefetched_iter(dataset, num_workers)
+            for i, sample in tqdm(
+                depth_iter,
+                total=num_samples,
+                desc="Processing sparse depth pairs",
+            ):
+                hierarchy, entry_id = _extract_hierarchy(sample)
+
+                point_cloud = to_numpy_point_cloud(sample["gt"])
+                depth_pred = to_numpy_depth(sample["pred"])
+                intrinsics_K = _get_intrinsics_K(sample)
+                camera_extrinsics = _get_camera_extrinsics(sample)
+                if intrinsics_K is None:
+                    raise ValueError(
+                        f"Sample {entry_id!r} is missing intrinsics for sparse depth projection."
+                    )
+                if camera_extrinsics is None:
+                    raise ValueError(
+                        f"Sample {entry_id!r} is missing camera_extrinsics for sparse depth projection."
+                    )
+
+                if i == 0:
+                    pred_native_dims = depth_pred.shape[:2]
+                    finite_pred = depth_pred[np.isfinite(depth_pred)]
+                    if finite_pred.size and finite_pred.max() <= 1.0 + 1e-3 and finite_pred.min() >= -1.0 - 1e-3:
+                        normalized_predictions = True
+                        input_space_detected = "normalized"
+                        print(
+                            f"  Detected native depth space: normalized "
+                            f"(range [{float(finite_pred.min()):.3f}, {float(finite_pred.max()):.3f}])"
+                        )
+                    elif finite_pred.size:
+                        input_space_detected = "metric"
+                        print(
+                            f"  Detected native depth space: metric "
+                            f"(range [{float(finite_pred.min()):.1f}, {float(finite_pred.max()):.1f}])"
+                        )
+                        if alignment_mode == "auto_affine":
+                            print("  Scale-and-shift: skipping calibration")
+
+                sparse_depth_gt, sparse_mask, projection_meta = (
+                    project_point_cloud_to_depth_map(
+                        point_cloud,
+                        intrinsics_K,
+                        camera_extrinsics,
+                        depth_pred.shape[:2],
+                    )
+                )
+                total_input_points += projection_meta["input_points"]
+                total_projected_pixels += projection_meta["projected_pixels"]
+
+                sky_valid = None
+                if sky_mask_enabled:
+                    sky_valid = _get_sky_mask(sample)
+                    if sky_valid is not None and sky_valid.shape[:2] != depth_pred.shape[:2]:
+                        sky_valid = align_to_prediction(sky_valid, depth_pred)
+
+                depth_pred_raw = process_depth(
+                    depth_pred, 1.0, pred_is_radial, intrinsics_K
+                )
+
+                if alignment_mode == "none":
+                    depth_pred_aligned = depth_pred_raw
+                else:
+                    do_alignment = alignment_mode == "affine" or normalized_predictions
+                    if do_alignment:
+                        fit_source = depth_pred if normalized_predictions else depth_pred_raw
+                        fit_mask = (
+                            sparse_mask
+                            & (sparse_depth_gt > 0)
+                            & np.isfinite(sparse_depth_gt)
+                            & np.isfinite(fit_source)
+                        )
+                        if sky_valid is not None:
+                            fit_mask &= sky_valid
+                        depth_pred_aligned, s, t = compute_scale_and_shift(
+                            fit_source,
+                            sparse_depth_gt,
+                            fit_mask,
+                            max_gt_percentile=(
+                                SKY_MASK_ALIGNMENT_MAX_GT_PERCENTILE
+                                if sky_mask_enabled
+                                else None
+                            ),
+                        )
+                        alignment_applied = True
+                        if verbose and not logged_stats:
+                            print(f"  Fitted scale={s:.4f}, shift={t:.4f}")
+                    else:
+                        depth_pred_aligned = depth_pred_raw
+
+                if verbose and not logged_stats:
+                    _log_sample_stats(sparse_depth_gt, depth_pred_aligned, "SPARSE DEPTH")
+                    logged_stats = True
+
+                raw_pred_path = _write_npy_array(str(raw_pred_dir), i, depth_pred_raw)
+                raw_valid_mask = _build_sparse_valid_mask(
+                    sparse_depth_gt, depth_pred_raw, sparse_mask, sky_valid
+                )
+                raw_metrics = _compute_sparse_metrics(
+                    sparse_depth_gt, depth_pred_raw, raw_valid_mask
+                )
+                _append_sparse_metrics(stores["raw"], raw_metrics, raw_pred_path)
+
+                if depth_pred_aligned is depth_pred_raw:
+                    aligned_metrics = raw_metrics
+                    aligned_valid_mask = raw_valid_mask
+                else:
+                    aligned_valid_mask = _build_sparse_valid_mask(
+                        sparse_depth_gt, depth_pred_aligned, sparse_mask, sky_valid
+                    )
+                    aligned_metrics = _compute_sparse_metrics(
+                        sparse_depth_gt, depth_pred_aligned, aligned_valid_mask
+                    )
+                    aligned_pred_path = _write_npy_array(
+                        str(aligned_pred_dir), i, depth_pred_aligned
+                    )
+                    _append_sparse_metrics(
+                        stores["aligned"], aligned_metrics, aligned_pred_path
+                    )
+
+                canonical_valid_mask = (
+                    aligned_valid_mask
+                    if (alignment_applied or not normalized_predictions)
+                    else raw_valid_mask
+                )
+                total_evaluated_pixels += int(canonical_valid_mask.sum())
+
+                raw_value = _build_per_file_sparse_value(raw_metrics)
+                metric_value = (
+                    raw_value
+                    if aligned_metrics is raw_metrics
+                    else _build_per_file_sparse_value(aligned_metrics)
+                )
+                emit_native = alignment_applied or normalized_predictions
+                emit_metric = alignment_applied or not normalized_predictions
+                canonical_value = metric_value if emit_metric else raw_value
+                file_metrics = {
+                    "sparse_depth": canonical_value,
+                }
+                if emit_native:
+                    file_metrics["sparse_depth_native"] = raw_value
+                if emit_metric:
+                    file_metrics["sparse_depth_metric"] = metric_value
+                set_value(
+                    per_file_metrics,
+                    hierarchy,
+                    entry_id,
+                    {
+                        "id": entry_id,
+                        "metrics": file_metrics,
+                    },
+                )
+
+                if benchmark_stores is not None:
+                    bm_bins = get_benchmark_depth_bins(
+                        sparse_depth_gt,
+                        benchmark_depth_range[0],
+                        benchmark_depth_range[1],
+                    )
+                    if benchmark_boundaries is None:
+                        benchmark_boundaries = bm_bins["boundaries"]
+
+                    for bn in _BENCHMARK_BIN_NAMES:
+                        native_bin_mask = bm_bins[bn].copy()
+                        native_bin_mask &= raw_valid_mask
+                        if native_bin_mask.any():
+                            bm_metrics = _compute_sparse_metrics(
+                                sparse_depth_gt, depth_pred_raw, native_bin_mask
+                            )
+                            _append_sparse_metrics(
+                                benchmark_stores["native"][bn],
+                                bm_metrics,
+                                raw_pred_path,
+                            )
+
+                        if aligned_metrics is not raw_metrics:
+                            metric_bin_mask = bm_bins[bn].copy()
+                            metric_bin_mask &= aligned_valid_mask
+                            if metric_bin_mask.any():
+                                bm_metrics = _compute_sparse_metrics(
+                                    sparse_depth_gt,
+                                    depth_pred_aligned,
+                                    metric_bin_mask,
+                                )
+                                _append_sparse_metrics(
+                                    benchmark_stores["metric"][bn],
+                                    bm_metrics,
+                                    stores["aligned"]["pred_depth_paths"][-1],
+                                )
+
+                if sanity_checker is not None:
+                    canonical_pred = (
+                        depth_pred_aligned
+                        if (alignment_applied or not normalized_predictions)
+                        else depth_pred_raw
+                    )
+                    sanity_checker.validate_depth_input(
+                        sparse_depth_gt, canonical_pred, entry_id
+                    )
+                    canonical_metrics = (
+                        aligned_metrics
+                        if (alignment_applied or not normalized_predictions)
+                        else raw_metrics
+                    )
+                    am = canonical_metrics["absrel_meta"]
+                    if am.get("median") is not None:
+                        sanity_checker.validate_depth_absrel(
+                            am["median"], am["p90"], entry_id
+                        )
+                    if len(canonical_metrics["rmse_arr"]) > 0:
+                        rmse_val = float(np.sqrt(np.mean(canonical_metrics["rmse_arr"])))
+                        gt_valid = sparse_depth_gt[
+                            _build_sparse_valid_mask(
+                                sparse_depth_gt, canonical_pred, sparse_mask, sky_valid
+                            )
+                        ]
+                        if gt_valid.size > 0:
+                            depth_range = float(gt_valid.max() - gt_valid.min())
+                            sanity_checker.validate_depth_rmse(
+                                rmse_val, depth_range, entry_id
+                            )
+                    sv = canonical_metrics["silog_full"]
+                    if np.isfinite(sv):
+                        sanity_checker.validate_depth_silog(sv, entry_id)
+
+            print("Aggregating sparse depth results...")
+
+            emit_native = alignment_applied or normalized_predictions
+            emit_metric = alignment_applied or not normalized_predictions
+
+            native_summary = (
+                _build_sparse_summary(stores["raw"])
+                if emit_native or (emit_metric and not alignment_applied)
+                else None
+            )
+            metric_summary = None
+            if emit_metric:
+                if alignment_applied:
+                    metric_summary = _build_sparse_summary(stores["aligned"])
+                else:
+                    metric_summary = copy.deepcopy(native_summary)
+            sparse_summary = metric_summary if emit_metric else native_summary
+
+            sparse_benchmark = None
+            if benchmark_stores is not None:
+                print("Aggregating sparse benchmark depth results...")
+                sparse_benchmark = {"boundaries": benchmark_boundaries}
+                if emit_native or (emit_metric and not alignment_applied):
+                    native_benchmark = {
+                        bn: _build_sparse_summary(benchmark_stores["native"][bn])
+                        for bn in _BENCHMARK_BIN_NAMES
+                    }
+                else:
+                    native_benchmark = None
+                if emit_native:
+                    sparse_benchmark["native"] = native_benchmark
+                if emit_metric:
+                    if alignment_applied:
+                        sparse_benchmark["metric"] = {
+                            bn: _build_sparse_summary(benchmark_stores["metric"][bn])
+                            for bn in _BENCHMARK_BIN_NAMES
+                        }
+                    else:
+                        sparse_benchmark["metric"] = copy.deepcopy(native_benchmark)
+
+            emitted_spaces = []
+            if emit_native:
+                emitted_spaces.append("native")
+            if emit_metric:
+                emitted_spaces.append("metric")
+
+            result = {
+                "sparse_depth_native": native_summary if emit_native else None,
+                "sparse_depth_metric": metric_summary if emit_metric else None,
+                "sparse_depth": sparse_summary,
+                "sparse_depth_benchmark": sparse_benchmark,
+                "per_file_metrics": per_file_metrics,
+                "dataset_info": {
+                    "num_pairs": num_samples,
+                    "gt_name": gt_name,
+                    "pred_name": pred_name,
+                    "gt_representation": "point_cloud",
+                    "input_points": total_input_points,
+                    "projected_pixels": total_projected_pixels,
+                    "evaluated_pixels": total_evaluated_pixels,
+                },
+                "space_info": {
+                    "input_space_detected": input_space_detected,
+                    "metric_space_source": (
+                        "scale_shift"
+                        if alignment_applied
+                        else ("native" if emit_metric else None)
+                    ),
+                    "calibration_mode": alignment_mode,
+                    "calibration_applied": alignment_applied,
+                    "emitted_spaces": emitted_spaces,
+                    "canonical_space": "metric" if emit_metric else "native",
+                },
+                "spatial_info": {
+                    "gt_dimensions": None,
+                    "pred_dimensions": {
+                        "height": pred_native_dims[0],
+                        "width": pred_native_dims[1],
+                    }
+                    if pred_native_dims
+                    else None,
+                    "method": "pointcloud_projection",
+                    "evaluated_dimensions": {
+                        "height": pred_native_dims[0],
+                        "width": pred_native_dims[1],
+                    }
+                    if pred_native_dims
+                    else None,
+                },
+            }
+            return result
+        finally:
+            for branch_store in stores.values():
+                branch_store["absrel_store"].close()
+                branch_store["rmse_store"].close()
+                branch_store["silog_store"].close()
+            if benchmark_stores is not None:
+                for space_stores in benchmark_stores.values():
+                    for bin_name in _BENCHMARK_BIN_NAMES:
+                        branch_store = space_stores[bin_name]
+                        branch_store["absrel_store"].close()
+                        branch_store["rmse_store"].close()
+                        branch_store["silog_store"].close()
 
 
 # ---------------------------------------------------------------------------
