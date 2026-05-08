@@ -1,0 +1,38 @@
+{
+    "gt": {
+        "name": "MUSES sparse GT",
+        "sparse_depth": {
+            "path": "/path/to/gt/sparse_depth",
+            "split": "test"
+        },
+        "intrinsics": {
+            "path": "/path/to/gt/intrinsics",
+            "split": "test"
+        },
+        "camera_extrinsics": {
+            "path": "/path/to/gt/camera_extrinsics",
+            "split": "test"
+        },
+        "segmentation": {
+            "path": "/path/to/gt/segmentation",
+            "split": "test"
+        }
+    },
+    "datasets": [
+        {
+            "name": "model_a_dense_depth",
+            "depth": {
+                "path": "/path/to/model_a/dense_depth",
+                "split": "test"
+            },
+            "output_file": "/path/to/output/model_a_sparse_depth_eval.json"
+        },
+        {
+            "name": "model_b_dense_depth",
+            "depth": {
+                "path": "/path/to/model_b/dense_depth",
+                "split": "test"
+            }
+        }
+    ]
+}
