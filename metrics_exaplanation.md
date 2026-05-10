@@ -19,6 +19,33 @@ This document describes the metrics as they are actually computed in this reposi
 - In `auto_affine`, affine alignment is only applied if the first prediction looks normalized (roughly within `[-1, 1]`).
 - RGB metrics assume images are already in `[0, 1]`.
 
+## Benchmark depth-range bins
+
+When `--benchmark-depth-range MIN MAX` is provided, benchmark summaries use only
+valid GT depth pixels where `MIN <= depth <= MAX`. The range is subdivided into
+`near`, `mid`, and `far` by taking three equal-width intervals in square-root
+depth space and squaring the split points back to metres:
+
+```text
+sqrt_min = sqrt(MIN)
+sqrt_max = sqrt(MAX)
+step = (sqrt_max - sqrt_min) / 3
+near_max = (sqrt_min + step)^2
+mid_max = (sqrt_min + 2 * step)^2
+```
+
+The masks are `near=[MIN, near_max)`, `mid=[near_max, mid_max)`, and
+`far=[mid_max, MAX]`; the `all` mask is the full inclusive range.
+
+For `MIN=0.01` and `MAX=80.0`, the computed bins are:
+
+| Bin | Depth interval |
+|---|---|
+| `all` | `[0.01, 80.0]` |
+| `near` | `[0.01, 9.290856529)` |
+| `mid` | `[9.290856529, 35.954189863)` |
+| `far` | `[35.954189863, 80.0]` |
+
 ## Depth metrics
 
 ### PSNR

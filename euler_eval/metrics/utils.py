@@ -145,6 +145,7 @@ def get_benchmark_depth_bins(
     well-behaved as range_min approaches zero (unlike log).
 
     For example:
+        [0.01, 80] -> near=[0.01, 9.29), mid=[9.29, 35.95), far=[35.95, 80].
         [0.1, 80] -> near=[0.1, 10.19), mid=[10.19, 36.83), far=[36.83, 80].
         [1, 80]   -> near=[1, 13.31),   mid=[13.31, 39.64), far=[39.64, 80].
 

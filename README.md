@@ -7,7 +7,7 @@ A comprehensive evaluation toolkit for comparing predicted depth maps, RGB image
 - **Depth metrics**: PSNR, SSIM, LPIPS, FID, KID, AbsRel, RMSE, Scale-Invariant Log Error, Normal Consistency, Depth Edge F1
 - **RGB metrics**: PSNR, SSIM, LPIPS, FID, SCE (Structural Chromatic Error), Edge F1, Tail Errors (p95/p99), High-Frequency Energy Ratio, Depth-Binned Photometric Error
 - **Rays metrics**: ρ_A (AUC of angular accuracy curve), Angular Error statistics and threshold percentages
-- **Benchmark binning**: Optional depth-range benchmark that subdivides metrics into log-scaled near/mid/far bins
+- **Benchmark binning**: Optional depth-range benchmark that subdivides metrics into square-root-scaled near/mid/far bins
 - **Sanity checking**: Automatic validation of metric results against configurable thresholds, with detailed warning reports
 - **Sky masking**: Optional exclusion of sky regions from metrics using GT segmentation
 - **Flexible dataset loading**: Automatic loader resolution via euler_loading and ds-crawler index metadata
@@ -103,7 +103,7 @@ This pre-downloads:
 | `--metrics-config` | `str` | auto-detect | Path to `metrics_config.json` for sanity checking |
 | `--depth-alignment` | `{none,auto_affine,affine}` | `auto_affine` | Depth calibration mode; outputs are emitted in semantic `native`/`metric` spaces and `depth` aliases the canonical branch |
 | `--rgb-fid-backend` | `{builtin,clean-fid}` | `builtin` | RGB FID backend; `clean-fid` requires optional dependency |
-| `--benchmark-depth-range` | `float float` | none | Depth range `[MIN, MAX]` in meters for benchmark evaluation; computes depth and RGB metrics for pixels within this range, subdivided into log-scaled near/mid/far bins (additive to regular metrics) |
+| `--benchmark-depth-range` | `float float` | none | Depth range `[MIN, MAX]` in meters for benchmark evaluation; computes depth and RGB metrics for pixels within this range, subdivided into square-root-scaled near/mid/far bins (additive to regular metrics) |
 
 ### Examples
 
@@ -130,7 +130,7 @@ depth-eval config.json --depth-alignment affine
 depth-eval config.json --rgb-fid-backend clean-fid
 
 # Benchmark depth and RGB metrics within a depth range (near/mid/far bins)
-depth-eval config.json --benchmark-depth-range 0.5 80.0
+depth-eval config.json --benchmark-depth-range 0.01 80.0
 
 # Evaluate dense depth predictions against sparse pointcloud GT
 depth-eval example_sparse_depth_config.json --skip-rgb --skip-rays
@@ -138,6 +138,30 @@ depth-eval example_sparse_depth_config.json --skip-rgb --skip-rays
 # Skip rays evaluation
 depth-eval config.json --skip-rays
 ```
+
+### Benchmark Depth Bins
+
+`--benchmark-depth-range MIN MAX` first filters valid GT depth pixels to
+`MIN <= depth <= MAX`. The `near`, `mid`, and `far` bins are then computed as
+three equal-width intervals in square-root depth space:
+
+```text
+sqrt_min = sqrt(MIN)
+sqrt_max = sqrt(MAX)
+step = (sqrt_max - sqrt_min) / 3
+near_max = (sqrt_min + step)^2
+mid_max = (sqrt_min + 2 * step)^2
+```
+
+The interval bounds are `near=[MIN, near_max)`, `mid=[near_max, mid_max)`, and
+`far=[mid_max, MAX]`. For `--benchmark-depth-range 0.01 80.0`, this gives:
+
+| Bin | Depth interval |
+|---|---|
+| `all` | `[0.01, 80.0]` |
+| `near` | `[0.01, 9.290856529)` |
+| `mid` | `[9.290856529, 35.954189863)` |
+| `far` | `[35.954189863, 80.0]` |
 
 ## Configuration
 
