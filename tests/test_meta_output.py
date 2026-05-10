@@ -1,9 +1,15 @@
 """Tests for the structured meta block in eval.json output."""
 
+import re
+
 from euler_eval.cli import (
     _clean_metric_tree,
     _depth_eval_axes,
     _DEPTH_EVAL_DESCRIPTIONS,
+    _sparse_depth_eval_axes,
+    _SPARSE_DEPTH_EVAL_DESCRIPTIONS,
+    _SPARSE_DEPTH_METRIC_NAMESPACE,
+    _sparse_depth_metric_set_envelope,
     _rgb_eval_axes,
     _RGB_EVAL_DESCRIPTIONS,
     _RAYS_EVAL_AXES,
@@ -12,7 +18,9 @@ from euler_eval.cli import (
 
 # Build base (non-benchmark) axis dicts for testing
 _DEPTH_EVAL_AXES = _depth_eval_axes()
+_SPARSE_DEPTH_EVAL_AXES = _sparse_depth_eval_axes()
 _RGB_EVAL_AXES = _rgb_eval_axes()
+_METRIC_NAMESPACE_RE = re.compile(r"^[a-z0-9]+(?:\.[a-z0-9_]+)+$")
 
 
 class TestMetaBlockStructure:
@@ -267,3 +275,21 @@ class TestMetricDescriptions:
         assert envelope["axes"]["space"]["position"] == 0
         assert envelope["axes"]["reduction"]["position"] == 2
         assert "psnr" in envelope["metricDescriptions"]
+
+    def test_sparse_depth_metric_namespace_conforms(self):
+        """Sparse-depth eval.json metricNamespace passes downstream validation."""
+        from euler_eval.cli import _EvalNamespace
+
+        ns = _EvalNamespace(
+            producer="euler-eval",
+            producer_version="1.7.0",
+            modalities=("sparse_depth",),
+            axes=_SPARSE_DEPTH_EVAL_AXES,
+            descriptions=_SPARSE_DEPTH_EVAL_DESCRIPTIONS,
+        )
+        envelope = _sparse_depth_metric_set_envelope(ns, metadata={})
+
+        assert envelope["metricNamespace"] == _SPARSE_DEPTH_METRIC_NAMESPACE
+        assert _METRIC_NAMESPACE_RE.fullmatch(envelope["metricNamespace"])
+        assert envelope["axes"]["space"]["position"] == 0
+        assert "rmse" in envelope["metricDescriptions"]

@@ -150,6 +150,11 @@ def _rgb_eval_axes(*, benchmark: bool = False) -> dict[str, AxisDeclaration]:
 
 _RAYS_EVAL_AXES: dict[str, AxisDeclaration] = {}
 
+# Downstream eval consumers validate metricSet.metricNamespace with a stricter
+# first-segment rule than euler_metric_naming's modality validator. Keep the
+# public sparse_depth result keys, but use a wire-compatible namespace alias.
+_SPARSE_DEPTH_METRIC_NAMESPACE = "sparsedepth.eval"
+
 # ── Metric descriptions ─────────────────────────────────────────────────────
 # Keys are *base metric names* (after stripping namespace + axes).
 # The same description applies across all axis combinations.
@@ -369,6 +374,17 @@ def _get_version() -> str:
         return importlib.metadata.version("euler-eval")
     except importlib.metadata.PackageNotFoundError:
         return "0.0.0"
+
+
+def _sparse_depth_metric_set_envelope(
+    namespace: _EvalNamespace,
+    *,
+    metadata: dict | None = None,
+) -> dict:
+    """Return the sparse-depth metricSet envelope with a compliant namespace."""
+    envelope = namespace.metric_set_envelope("sparse_depth", metadata=metadata)
+    envelope["metricNamespace"] = _SPARSE_DEPTH_METRIC_NAMESPACE
+    return envelope
 
 
 def _clean_metric_tree(tree: dict) -> dict:
@@ -1131,8 +1147,8 @@ def main():
                 descriptions=_SPARSE_DEPTH_EVAL_DESCRIPTIONS,
             )
             depth_save = {
-                "metricSet": sparse_depth_ns.metric_set_envelope(
-                    "sparse_depth",
+                "metricSet": _sparse_depth_metric_set_envelope(
+                    sparse_depth_ns,
                     metadata={
                         "input_space_detected": space_info.get(
                             "input_space_detected", "unknown"
