@@ -93,6 +93,12 @@ class _OneSampleSparseDataset:
         return {"gt": {"path": "/gt"}, "pred": {"path": "/pred"}}
 
 
+class _ZeroValidSparseDataset(_OneSampleSparseDataset):
+    def __init__(self):
+        super().__init__()
+        self.pred = np.zeros((3, 3), dtype=np.float32)
+
+
 def test_sparse_depth_eval_reports_only_pointwise_depth_metrics():
     dataset = _OneSampleSparseDataset()
 
@@ -111,3 +117,20 @@ def test_sparse_depth_eval_reports_only_pointwise_depth_metrics():
     np.testing.assert_allclose(metrics["standard"]["pixel_pool"]["absrel"], 0.0)
     np.testing.assert_allclose(metrics["standard"]["pixel_pool"]["delta1"], 1.0)
     np.testing.assert_allclose(metrics["depth_metrics"]["rmse"]["median"], 0.0)
+
+
+def test_sparse_depth_per_file_reports_zero_valid_support():
+    result = evaluate_sparse_depth_samples(
+        _ZeroValidSparseDataset(),
+        pred_is_radial=True,
+        num_workers=0,
+        alignment_mode="none",
+    )
+
+    assert result["dataset_info"]["projected_pixels"] == 2
+    assert result["dataset_info"]["evaluated_pixels"] == 0
+
+    per_file = result["per_file_metrics"]["files"][0]["metrics"]["sparse_depth"]
+    assert per_file["depth_metrics"]["valid_pixel_count"] == 0
+    assert per_file["depth_metrics"]["absrel"] is None
+    assert per_file["depth_metrics"]["rmse"] is None

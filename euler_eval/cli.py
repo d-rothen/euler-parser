@@ -292,6 +292,10 @@ _SPARSE_DEPTH_EVAL_DESCRIPTIONS = {
         "silog.p90",
     }
 }
+_SPARSE_DEPTH_EVAL_DESCRIPTIONS["valid_pixel_count"] = MetricDescription(
+    unit="pixels",
+    display_name="Valid Pixel Count",
+)
 
 _RGB_EVAL_DESCRIPTIONS = {
     "psnr": MetricDescription(is_higher_better=True, unit="dB", display_name="PSNR"),
@@ -389,7 +393,11 @@ def _sparse_depth_metric_set_envelope(
     return envelope
 
 
-def _clean_metric_tree(tree: dict) -> dict:
+def _clean_metric_tree(
+    tree: dict,
+    *,
+    preserve_empty_dict_keys: set[str] | None = None,
+) -> dict:
     """Recursively sanitize a metric dict for JSON schema compliance.
 
     - Removes entries where the value is ``None``
@@ -397,6 +405,7 @@ def _clean_metric_tree(tree: dict) -> dict:
     - Recursively processes nested dicts and list items
     - Prunes empty dicts after cleaning
     """
+    preserve_empty_dict_keys = preserve_empty_dict_keys or set()
     cleaned = {}
     for key, value in tree.items():
         if value is None:
@@ -404,17 +413,90 @@ def _clean_metric_tree(tree: dict) -> dict:
         if isinstance(value, float) and not math.isfinite(value):
             continue
         if isinstance(value, dict):
-            sub = _clean_metric_tree(value)
-            if sub:
+            sub = _clean_metric_tree(
+                value,
+                preserve_empty_dict_keys=preserve_empty_dict_keys,
+            )
+            if sub or key in preserve_empty_dict_keys:
                 cleaned[key] = sub
         elif isinstance(value, list):
             cleaned[key] = [
-                _clean_metric_tree(item) if isinstance(item, dict) else item
+                _clean_metric_tree(
+                    item,
+                    preserve_empty_dict_keys=preserve_empty_dict_keys,
+                )
+                if isinstance(item, dict)
+                else item
                 for item in value
             ]
         else:
             cleaned[key] = value
     return cleaned
+
+
+def _empty_per_file_metric_ids(
+    node: dict,
+    hierarchy: tuple[str, ...] = (),
+) -> list[str]:
+    """Return file identifiers whose cleaned per-file metrics are empty."""
+    ids = []
+    for file_entry in node.get("files", []):
+        if not isinstance(file_entry, dict):
+            continue
+        if file_entry.get("metrics") == {}:
+            file_id = str(file_entry.get("id", "<missing-id>"))
+            ids.append("/".join((*hierarchy, file_id)))
+
+    children = node.get("children", {})
+    if isinstance(children, dict):
+        for child_name, child_node in children.items():
+            if isinstance(child_node, dict):
+                ids.extend(
+                    _empty_per_file_metric_ids(
+                        child_node,
+                        (*hierarchy, str(child_name)),
+                    )
+                )
+    return ids
+
+
+def _clean_per_file_metrics(tree: dict, *, label: str = "per_file_metrics") -> dict:
+    """Clean a per-file metric tree while preserving file-entry shape.
+
+    Some per-file metric entries can legitimately clean down to no scalar
+    metrics, for example when every metric for a file is ``None``/NaN after a
+    failed computation or an invalid sample.  The generic cleaner prunes empty
+    dicts, but per-file entries are schema-shaped as ``{"id", "metrics"}``;
+    dropping the empty ``metrics`` object leaves an id-only file entry.
+    """
+    cleaned = _clean_metric_tree(tree, preserve_empty_dict_keys={"metrics"})
+    empty_ids = _empty_per_file_metric_ids(cleaned)
+    if empty_ids:
+        sample = ", ".join(empty_ids[:10])
+        suffix = "" if len(empty_ids) <= 10 else f", ... +{len(empty_ids) - 10} more"
+        print(
+            f"Warning: {label} has {len(empty_ids)} file entries with no finite "
+            f"metrics after cleaning: {sample}{suffix}"
+        )
+    return cleaned
+
+
+def _wrap_depth_space_pfm_metrics(
+    metrics: dict,
+    *,
+    metric_root: str,
+    canonical_key: str,
+    canonical_space: str | None = "metric",
+) -> dict:
+    """Wrap per-file depth-like metrics under the serialized namespace path."""
+    space_metrics = {
+        space: metrics[f"{canonical_key}_{space}"]
+        for space in ("native", "metric")
+        if f"{canonical_key}_{space}" in metrics
+    }
+    if not space_metrics and canonical_key in metrics:
+        space_metrics[canonical_space or "metric"] = metrics[canonical_key]
+    return {metric_root: {"eval": space_metrics}}
 
 
 def _wrap_pfm_metrics(pfm: dict, wrapper_fn) -> dict:
@@ -1065,21 +1147,18 @@ def main():
                     all_results[depth_key] = depth_results[depth_key]
             depth_pfm = depth_results.get("per_file_metrics", {})
             if depth_pfm:
-                depth_save["per_file_metrics"] = _clean_metric_tree(
+                canonical_space = space_info.get("canonical_space", "metric")
+                depth_save["per_file_metrics"] = _clean_per_file_metrics(
                     _wrap_pfm_metrics(
                         depth_pfm,
-                        lambda m: (
-                            {
-                                "depth": {
-                                    "eval": {
-                                        space: m[f"depth_{space}"]
-                                        for space in ("native", "metric")
-                                        if f"depth_{space}" in m
-                                    },
-                                },
-                            }
+                        lambda m: _wrap_depth_space_pfm_metrics(
+                            m,
+                            metric_root="depth",
+                            canonical_key="depth",
+                            canonical_space=canonical_space,
                         ),
-                    )
+                    ),
+                    label="depth per_file_metrics",
                 )
             all_results.setdefault("per_file_metrics", {}).update(depth_pfm)
 
@@ -1258,21 +1337,18 @@ def main():
                     all_results[depth_key] = sparse_depth_results[depth_key]
             sparse_depth_pfm = sparse_depth_results.get("per_file_metrics", {})
             if sparse_depth_pfm:
-                depth_save["per_file_metrics"] = _clean_metric_tree(
+                canonical_space = space_info.get("canonical_space", "metric")
+                depth_save["per_file_metrics"] = _clean_per_file_metrics(
                     _wrap_pfm_metrics(
                         sparse_depth_pfm,
-                        lambda m: (
-                            {
-                                _SPARSE_DEPTH_METRIC_ROOT: {
-                                    "eval": {
-                                        space: m[f"sparse_depth_{space}"]
-                                        for space in ("native", "metric")
-                                        if f"sparse_depth_{space}" in m
-                                    },
-                                },
-                            }
+                        lambda m: _wrap_depth_space_pfm_metrics(
+                            m,
+                            metric_root=_SPARSE_DEPTH_METRIC_ROOT,
+                            canonical_key="sparse_depth",
+                            canonical_space=canonical_space,
                         ),
-                    )
+                    ),
+                    label="sparse_depth per_file_metrics",
                 )
             all_results.setdefault("per_file_metrics", {}).update(sparse_depth_pfm)
 
@@ -1417,11 +1493,12 @@ def main():
                 all_results["rgb_benchmark"] = rgb_benchmark
             rgb_pfm = rgb_results.get("per_file_metrics", {})
             if rgb_pfm:
-                rgb_save["per_file_metrics"] = _clean_metric_tree(
+                rgb_save["per_file_metrics"] = _clean_per_file_metrics(
                     _wrap_pfm_metrics(
                         rgb_pfm,
                         lambda m: {"rgb": {"eval": m.get("rgb", {})}},
-                    )
+                    ),
+                    label="rgb per_file_metrics",
                 )
             all_results.setdefault("per_file_metrics", {}).update(rgb_pfm)
 
@@ -1519,11 +1596,12 @@ def main():
                 all_results["rays"] = rays_metrics
             rays_pfm = rays_results.get("per_file_metrics", {})
             if rays_pfm:
-                rays_save["per_file_metrics"] = _clean_metric_tree(
+                rays_save["per_file_metrics"] = _clean_per_file_metrics(
                     _wrap_pfm_metrics(
                         rays_pfm,
                         lambda m: {"rays": {"eval": m.get("rays", {})}},
-                    )
+                    ),
+                    label="rays per_file_metrics",
                 )
             all_results.setdefault("per_file_metrics", {}).update(rays_pfm)
 

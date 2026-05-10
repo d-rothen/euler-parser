@@ -1613,6 +1613,7 @@ def evaluate_sparse_depth_samples(
                 for key, value in metrics["standard_metrics"].items()
             },
             "depth_metrics": {
+                "valid_pixel_count": metrics["valid_pixel_count"],
                 "absrel": float(np.mean(absrel_arr)) if len(absrel_arr) > 0 else None,
                 "rmse": (
                     float(np.sqrt(np.mean(rmse_arr))) if len(rmse_arr) > 0 else None

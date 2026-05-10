@@ -4,6 +4,7 @@ import re
 
 from euler_eval.cli import (
     _clean_metric_tree,
+    _clean_per_file_metrics,
     _depth_eval_axes,
     _DEPTH_EVAL_DESCRIPTIONS,
     _sparse_depth_eval_axes,
@@ -15,6 +16,7 @@ from euler_eval.cli import (
     _RGB_EVAL_DESCRIPTIONS,
     _RAYS_EVAL_AXES,
     _RAYS_EVAL_DESCRIPTIONS,
+    _wrap_depth_space_pfm_metrics,
 )
 
 # Build base (non-benchmark) axis dicts for testing
@@ -96,6 +98,105 @@ class TestMetaBlockStructure:
         }
         cleaned = _clean_metric_tree(meta)
         assert "eval_params" not in cleaned
+
+    def test_per_file_metrics_object_preserved_when_metrics_clean_empty(self):
+        """Per-file entries keep a metrics object even if all values are pruned."""
+        per_file = {
+            "files": [
+                {
+                    "id": "frame_0001",
+                    "metrics": {
+                        "rgb": {
+                            "eval": {
+                                "image_quality": {
+                                    "psnr": None,
+                                    "ssim": float("nan"),
+                                },
+                            },
+                        },
+                    },
+                },
+            ],
+        }
+
+        assert _clean_metric_tree(per_file) == {"files": [{"id": "frame_0001"}]}
+        assert _clean_per_file_metrics(per_file) == {
+            "files": [{"id": "frame_0001", "metrics": {}}]
+        }
+
+    def test_depth_per_file_wrapper_falls_back_to_canonical_metrics(self):
+        """Canonical-only per-file depth metrics still serialize under a space."""
+        metrics = {
+            "depth": {
+                "standard": {
+                    "absrel": 0.1,
+                },
+            },
+        }
+
+        assert _wrap_depth_space_pfm_metrics(
+            metrics,
+            metric_root="depth",
+            canonical_key="depth",
+            canonical_space="native",
+        ) == {
+            "depth": {
+                "eval": {
+                    "native": metrics["depth"],
+                },
+            },
+        }
+
+    def test_sparse_depth_zero_valid_count_survives_cleaning(self):
+        """Zero-support sparse entries keep a finite support metric in eval.json."""
+        metrics = {
+            "sparse_depth": {
+                "standard": {
+                    "absrel": None,
+                },
+                "depth_metrics": {
+                    "valid_pixel_count": 0,
+                    "absrel": None,
+                    "rmse": None,
+                },
+            },
+        }
+
+        wrapped = _wrap_depth_space_pfm_metrics(
+            metrics,
+            metric_root=_SPARSE_DEPTH_METRIC_ROOT,
+            canonical_key="sparse_depth",
+            canonical_space="metric",
+        )
+        cleaned = _clean_per_file_metrics(
+            {
+                "files": [
+                    {
+                        "id": "frame",
+                        "metrics": wrapped,
+                    },
+                ],
+            }
+        )
+
+        assert cleaned == {
+            "files": [
+                {
+                    "id": "frame",
+                    "metrics": {
+                        _SPARSE_DEPTH_METRIC_ROOT: {
+                            "eval": {
+                                "metric": {
+                                    "depth_metrics": {
+                                        "valid_pixel_count": 0,
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            ],
+        }
 
     def test_meta_in_full_save_dict(self):
         """meta sits alongside metricSet and dataset_info without conflict."""
