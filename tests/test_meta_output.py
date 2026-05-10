@@ -9,6 +9,7 @@ from euler_eval.cli import (
     _sparse_depth_eval_axes,
     _SPARSE_DEPTH_EVAL_DESCRIPTIONS,
     _SPARSE_DEPTH_METRIC_NAMESPACE,
+    _SPARSE_DEPTH_METRIC_ROOT,
     _sparse_depth_metric_set_envelope,
     _rgb_eval_axes,
     _RGB_EVAL_DESCRIPTIONS,
@@ -21,6 +22,19 @@ _DEPTH_EVAL_AXES = _depth_eval_axes()
 _SPARSE_DEPTH_EVAL_AXES = _sparse_depth_eval_axes()
 _RGB_EVAL_AXES = _rgb_eval_axes()
 _METRIC_NAMESPACE_RE = re.compile(r"^[a-z0-9]+(?:\.[a-z0-9_]+)+$")
+
+
+def _flatten_numeric_metrics(obj, prefix=""):
+    results = []
+    for key, value in obj.items():
+        full_key = f"{prefix}.{key}" if prefix else key
+        if key in {"metricSet", "dataset_info", "meta", "per_file_metrics"}:
+            continue
+        if isinstance(value, (int, float)):
+            results.append(full_key)
+        elif isinstance(value, dict):
+            results.extend(_flatten_numeric_metrics(value, full_key))
+    return results
 
 
 class TestMetaBlockStructure:
@@ -293,3 +307,44 @@ class TestMetricDescriptions:
         assert _METRIC_NAMESPACE_RE.fullmatch(envelope["metricNamespace"])
         assert envelope["axes"]["space"]["position"] == 0
         assert "rmse" in envelope["metricDescriptions"]
+
+    def test_sparse_depth_metric_tree_matches_declared_namespace(self):
+        """Sparse-depth aggregate and per-file paths live under sparsedepth.eval."""
+        metrics = {
+            _SPARSE_DEPTH_METRIC_ROOT: {
+                "eval": {
+                    "metric": {
+                        "standard": {
+                            "image_mean": {
+                                "absrel": 0.1,
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        payload = {
+            "metricSet": {"metricNamespace": _SPARSE_DEPTH_METRIC_NAMESPACE},
+            **metrics,
+            "per_file_metrics": {
+                "files": [
+                    {
+                        "id": "frame_0001",
+                        "metrics": metrics,
+                    },
+                ],
+            },
+        }
+
+        metric_names = _flatten_numeric_metrics(payload)
+        per_file_metric_names = _flatten_numeric_metrics(
+            payload["per_file_metrics"]["files"][0]["metrics"]
+        )
+
+        assert metric_names == [
+            "sparsedepth.eval.metric.standard.image_mean.absrel"
+        ]
+        assert all(
+            name.startswith(f"{_SPARSE_DEPTH_METRIC_NAMESPACE}.")
+            for name in metric_names + per_file_metric_names
+        )

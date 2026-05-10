@@ -152,8 +152,10 @@ _RAYS_EVAL_AXES: dict[str, AxisDeclaration] = {}
 
 # Downstream eval consumers validate metricSet.metricNamespace with a stricter
 # first-segment rule than euler_metric_naming's modality validator. Keep the
-# public sparse_depth result keys, but use a wire-compatible namespace alias.
-_SPARSE_DEPTH_METRIC_NAMESPACE = "sparsedepth.eval"
+# public Python sparse_depth result keys, but use a wire-compatible metric root
+# in eval.json so flattened metric paths live under the declared namespace.
+_SPARSE_DEPTH_METRIC_ROOT = "sparsedepth"
+_SPARSE_DEPTH_METRIC_NAMESPACE = f"{_SPARSE_DEPTH_METRIC_ROOT}.eval"
 
 # ── Metric descriptions ─────────────────────────────────────────────────────
 # Keys are *base metric names* (after stripping namespace + axes).
@@ -1205,7 +1207,7 @@ def main():
                         ),
                     },
                 }),
-                "sparse_depth": {"eval": {}},
+                _SPARSE_DEPTH_METRIC_ROOT: {"eval": {}},
             }
             for space_name, result_key in (
                 ("native", "sparse_depth_native"),
@@ -1213,19 +1215,19 @@ def main():
             ):
                 branch = sparse_depth_results.get(result_key)
                 if branch is not None:
-                    depth_save["sparse_depth"]["eval"][space_name] = (
+                    depth_save[_SPARSE_DEPTH_METRIC_ROOT]["eval"][space_name] = (
                         _clean_metric_tree(branch)
                     )
 
             sparse_depth_benchmark = sparse_depth_results.get("sparse_depth_benchmark")
             if sparse_depth_benchmark is not None:
                 for space_name in ("native", "metric"):
-                    if space_name not in depth_save["sparse_depth"]["eval"]:
+                    if space_name not in depth_save[_SPARSE_DEPTH_METRIC_ROOT]["eval"]:
                         continue
                     space_benchmark = sparse_depth_benchmark.get(space_name)
                     if space_benchmark is None:
                         continue
-                    target = depth_save["sparse_depth"]["eval"][space_name]
+                    target = depth_save[_SPARSE_DEPTH_METRIC_ROOT]["eval"][space_name]
                     for bn in ("all", "near", "mid", "far"):
                         bin_summary = space_benchmark.get(bn, {})
                         for category, metrics in bin_summary.items():
@@ -1261,7 +1263,7 @@ def main():
                         sparse_depth_pfm,
                         lambda m: (
                             {
-                                "sparse_depth": {
+                                _SPARSE_DEPTH_METRIC_ROOT: {
                                     "eval": {
                                         space: m[f"sparse_depth_{space}"]
                                         for space in ("native", "metric")
@@ -1534,7 +1536,11 @@ def main():
         # Save per-modality results to respective dataset paths
         if depth_save:
             depth_out = save_results(depth_save, dataset_config, modality="depth")
-            depth_label = "Sparse depth" if "sparse_depth" in depth_save else "Depth"
+            depth_label = (
+                "Sparse depth"
+                if _SPARSE_DEPTH_METRIC_ROOT in depth_save
+                else "Depth"
+            )
             print(f"\n  {depth_label} results saved to: {depth_out}")
         if rgb_save:
             rgb_out = save_results(rgb_save, dataset_config, modality="rgb")

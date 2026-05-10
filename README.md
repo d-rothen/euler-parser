@@ -268,13 +268,14 @@ Controls sanity check thresholds. See [metrics_config.json](metrics_config.json)
 ### Sparse Depth Metrics
 
 Sparse pointcloud GT evaluation reports only metrics that remain meaningful at isolated projected points. Dense image-quality and geometric metrics such as SSIM, LPIPS, FID, normals, and edge F1 are intentionally skipped.
+Serialized `eval.json` sparse-depth metrics use the namespace root `sparsedepth` (without an underscore), so flattened metric names match `metricSet.metricNamespace = "sparsedepth.eval"`.
 
 | Metric | Key | Description |
 |---|---|---|
-| Standard depth metrics | `sparse_depth.standard.{image_mean,image_median,pixel_pool}.*` | Same monocular-depth reducers as dense depth, computed only at projected sparse GT pixels |
-| AbsRel | `sparse_depth.depth_metrics.absrel` | Absolute Relative Error (\|pred-gt\|/gt), reported as median and p90 over projected sparse pixels |
-| RMSE | `sparse_depth.depth_metrics.rmse` | Root Mean Square Error, reported as median and p90 over projected sparse pixels |
-| SILog | `sparse_depth.depth_metrics.silog` | Scale-Invariant Log Error, reported as mean, median, and p90 over projected sparse pixels |
+| Standard depth metrics | `sparsedepth.eval.{native,metric}.standard.{image_mean,image_median,pixel_pool}.*` | Same monocular-depth reducers as dense depth, computed only at projected sparse GT pixels |
+| AbsRel | `sparsedepth.eval.{native,metric}.depth_metrics.absrel` | Absolute Relative Error (\|pred-gt\|/gt), reported as median and p90 over projected sparse pixels |
+| RMSE | `sparsedepth.eval.{native,metric}.depth_metrics.rmse` | Root Mean Square Error, reported as median and p90 over projected sparse pixels |
+| SILog | `sparsedepth.eval.{native,metric}.depth_metrics.silog` | Scale-Invariant Log Error, reported as mean, median, and p90 over projected sparse pixels |
 
 ### RGB metrics
 
@@ -320,8 +321,8 @@ When `--rgb-fid-backend clean-fid` is used, `euler-eval` will honor `CLEANFID_CA
   "depth": {
     "...": "canonical alias of depth_metric when present, else depth_native"
   },
-  "sparse_depth": {
-    "...": "canonical sparse-depth alias when gt.sparse_depth is used"
+  "sparsedepth": {
+    "eval": { "...": "serialized sparse-depth metrics when gt.sparse_depth is used" }
   },
   "rgb": {
     "...": "..."
@@ -338,7 +339,7 @@ When `--rgb-fid-backend clean-fid` is used, `euler-eval` will honor `CLEANFID_CA
                   "depth": { "...": "canonical alias" },
                   "depth_native": { "...": "native, when emitted" },
                   "depth_metric": { "...": "metric, when emitted" },
-                  "sparse_depth": { "...": "canonical sparse-depth alias" },
+                  "sparsedepth": { "eval": { "...": "serialized sparse-depth metrics" } },
                   "rgb": { "...": "..." }
                 }
               }
@@ -358,7 +359,7 @@ For depth outputs:
 - `standard`: explicit monocular-depth metrics with three reducers:
   `image_mean`, `image_median`, and `pixel_pool`.
 
-For sparse depth outputs, the same native/metric/canonical pattern is emitted under `sparse_depth_native`, `sparse_depth_metric`, and `sparse_depth`, but only `standard` and `depth_metrics` categories are present.
+For sparse depth outputs, the internal Python result dict still uses `sparse_depth_native`, `sparse_depth_metric`, and `sparse_depth`, but serialized `eval.json` metric paths are rooted at `sparsedepth.eval` to satisfy external namespace validation. Only `standard` and `depth_metrics` categories are present.
 
 Previous single-depth structure (kept under `depth`) is:
 
