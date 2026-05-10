@@ -525,7 +525,13 @@ def _resolve_sky_mask_loader(segmentation_path: str) -> Callable[..., Any]:
     its ``sky_mask`` function so that raw class-segmentation data is
     converted to a boolean sky mask at load time.
     """
-    index = index_dataset_from_path(segmentation_path)
+    try:
+        index = index_dataset_from_path(
+            segmentation_path,
+            metadata_scope="segmentation",
+        )
+    except FileNotFoundError:
+        index = index_dataset_from_path(segmentation_path)
     # Resolve euler_loading metadata the same way euler-loading does:
     # try the contract addon API first (handles addons.euler_loading),
     # then fall back to top-level euler_loading for legacy indices.
@@ -556,6 +562,25 @@ def _resolve_sky_mask_loader(segmentation_path: str) -> Callable[..., Any]:
 # ---------------------------------------------------------------------------
 # Dataset construction
 # ---------------------------------------------------------------------------
+
+
+def _modality(
+    *,
+    path: str,
+    modality_key: str,
+    split: Optional[str] = None,
+    loader: Optional[Callable[..., Any]] = None,
+    used_as: Optional[str] = None,
+) -> Modality:
+    """Create an euler-loading modality with an explicit metadata selector."""
+    return Modality(
+        path=path,
+        loader=loader,
+        used_as=used_as,
+        modality_type=modality_key,
+        metadata_scope=modality_key,
+        split=split,
+    )
 
 
 def build_depth_eval_dataset(
@@ -590,16 +615,34 @@ def build_depth_eval_dataset(
         A MultiModalDataset instance.
     """
     modalities = {
-        "gt": Modality(path=gt_depth_path, split=gt_depth_split),
-        "pred": Modality(path=pred_depth_path, used_as="output", split=pred_depth_split),
+        "gt": _modality(
+            path=gt_depth_path,
+            modality_key="depth",
+            split=gt_depth_split,
+        ),
+        "pred": _modality(
+            path=pred_depth_path,
+            modality_key="depth",
+            used_as="output",
+            split=pred_depth_split,
+        ),
     }
 
     hierarchical = {}
     if calibration_path is not None:
-        hierarchical["calibration"] = Modality(path=calibration_path, split=calibration_split)
+        hierarchical["calibration"] = _modality(
+            path=calibration_path,
+            modality_key="calibration",
+            split=calibration_split,
+        )
     if segmentation_path is not None:
         sky_fn = _resolve_sky_mask_loader(segmentation_path)
-        hierarchical["segmentation"] = Modality(path=segmentation_path, loader=sky_fn, split=segmentation_split)
+        hierarchical["segmentation"] = _modality(
+            path=segmentation_path,
+            modality_key="segmentation",
+            loader=sky_fn,
+            split=segmentation_split,
+        )
 
     return MultiModalDataset(
         modalities=modalities,
@@ -626,21 +669,36 @@ def build_sparse_depth_eval_dataset(
     calibration under ``"intrinsics"`` and ``"camera_extrinsics"``.
     """
     modalities = {
-        "gt": Modality(path=gt_sparse_depth_path, split=gt_sparse_depth_split),
-        "pred": Modality(path=pred_depth_path, used_as="output", split=pred_depth_split),
+        "gt": _modality(
+            path=gt_sparse_depth_path,
+            modality_key="sparse_depth",
+            split=gt_sparse_depth_split,
+        ),
+        "pred": _modality(
+            path=pred_depth_path,
+            modality_key="depth",
+            used_as="output",
+            split=pred_depth_split,
+        ),
     }
 
     hierarchical = {
-        "intrinsics": Modality(path=intrinsics_path, split=intrinsics_split),
-        "camera_extrinsics": Modality(
+        "intrinsics": _modality(
+            path=intrinsics_path,
+            modality_key="intrinsics",
+            split=intrinsics_split,
+        ),
+        "camera_extrinsics": _modality(
             path=camera_extrinsics_path,
+            modality_key="camera_extrinsics",
             split=camera_extrinsics_split,
         ),
     }
     if segmentation_path is not None:
         sky_fn = _resolve_sky_mask_loader(segmentation_path)
-        hierarchical["segmentation"] = Modality(
+        hierarchical["segmentation"] = _modality(
             path=segmentation_path,
+            modality_key="segmentation",
             loader=sky_fn,
             split=segmentation_split,
         )
@@ -687,18 +745,40 @@ def build_rgb_eval_dataset(
         A MultiModalDataset instance.
     """
     modalities: dict[str, Modality] = {
-        "gt": Modality(path=gt_rgb_path, split=gt_rgb_split),
-        "pred": Modality(path=pred_rgb_path, used_as="output", split=pred_rgb_split),
+        "gt": _modality(
+            path=gt_rgb_path,
+            modality_key="rgb",
+            split=gt_rgb_split,
+        ),
+        "pred": _modality(
+            path=pred_rgb_path,
+            modality_key="rgb",
+            used_as="output",
+            split=pred_rgb_split,
+        ),
     }
     if gt_depth_path is not None:
-        modalities["gt_depth"] = Modality(path=gt_depth_path, split=gt_depth_split)
+        modalities["gt_depth"] = _modality(
+            path=gt_depth_path,
+            modality_key="depth",
+            split=gt_depth_split,
+        )
 
     hierarchical = {}
     if calibration_path is not None:
-        hierarchical["calibration"] = Modality(path=calibration_path, split=calibration_split)
+        hierarchical["calibration"] = _modality(
+            path=calibration_path,
+            modality_key="calibration",
+            split=calibration_split,
+        )
     if segmentation_path is not None:
         sky_fn = _resolve_sky_mask_loader(segmentation_path)
-        hierarchical["segmentation"] = Modality(path=segmentation_path, loader=sky_fn, split=segmentation_split)
+        hierarchical["segmentation"] = _modality(
+            path=segmentation_path,
+            modality_key="segmentation",
+            loader=sky_fn,
+            split=segmentation_split,
+        )
 
     return MultiModalDataset(
         modalities=modalities,
@@ -779,13 +859,26 @@ def build_rays_eval_dataset(
         A MultiModalDataset instance.
     """
     modalities = {
-        "gt": Modality(path=gt_rays_path, split=gt_rays_split),
-        "pred": Modality(path=pred_rays_path, used_as="output", split=pred_rays_split),
+        "gt": _modality(
+            path=gt_rays_path,
+            modality_key="rays",
+            split=gt_rays_split,
+        ),
+        "pred": _modality(
+            path=pred_rays_path,
+            modality_key="rays",
+            used_as="output",
+            split=pred_rays_split,
+        ),
     }
 
     hierarchical = {}
     if calibration_path is not None:
-        hierarchical["calibration"] = Modality(path=calibration_path, split=calibration_split)
+        hierarchical["calibration"] = _modality(
+            path=calibration_path,
+            modality_key="calibration",
+            split=calibration_split,
+        )
 
     return MultiModalDataset(
         modalities=modalities,
