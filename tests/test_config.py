@@ -65,6 +65,25 @@ class TestValidateGtConfig:
         gt = {"rgb": {"path": f"{rgb_path}#scope=rgb"}}
         validate_gt_config(gt)
 
+    def test_inline_scope_intrinsics_gt_path_is_valid(self, tmp_path):
+        depth_path = tmp_path / "depth"
+        depth_path.mkdir()
+        intrinsics_path = tmp_path / "frame_camera_trainvaltest.zip"
+        with zipfile.ZipFile(intrinsics_path, "w") as zf:
+            zf.writestr("dummy.txt", "x")
+        gt = {
+            "depth": {"path": str(depth_path)},
+            "intrinsics": {"path": f"{intrinsics_path}#scope=intrinsics"},
+        }
+        validate_gt_config(gt)
+
+    def test_inline_split_and_scope_gt_path_is_valid(self, tmp_path):
+        rgb_path = tmp_path / "reference.zip"
+        with zipfile.ZipFile(rgb_path, "w") as zf:
+            zf.writestr("dummy.txt", "x")
+        gt = {"rgb": {"path": f"{rgb_path}:fog_day#scope=rgb"}}
+        validate_gt_config(gt)
+
     def test_sparse_depth_requires_projection_modalities(self, tmp_path):
         sparse_path = tmp_path / "sparse_depth"
         sparse_path.mkdir()

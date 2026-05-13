@@ -13,6 +13,7 @@ import torch
 from ds_crawler import get_dataset_contract, index_dataset_from_path
 from euler_loading import Modality, MultiModalDataset, resolve_loader_module
 
+from .config_paths import build_modality
 from .metrics.utils import convert_planar_to_radial
 
 # ---------------------------------------------------------------------------
@@ -574,12 +575,11 @@ def _modality(
     used_as: Optional[str] = None,
 ) -> Modality:
     """Create an euler-loading modality with an explicit metadata selector."""
-    return Modality(
+    return build_modality(
         path=path,
         loader=loader,
         used_as=used_as,
-        modality_type=modality_key,
-        metadata_scope=modality_key,
+        modality_key=modality_key,
         split=split,
     )
 
