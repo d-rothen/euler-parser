@@ -192,3 +192,14 @@ def test_sky_mask_loader_resolution_strips_inline_split(monkeypatch):
     assert calls == [
         ("/datasets/shared.zip", {"metadata_scope": "segmentation"}),
     ]
+
+
+def test_modality_parses_inline_split_and_scope():
+    modality = data._modality(
+        path="/datasets/frame_camera_trainvaltest.zip:fog_day#scope=intrinsics",
+        modality_key="intrinsics",
+    )
+
+    assert modality.path == "/datasets/frame_camera_trainvaltest.zip"
+    assert modality.split == "fog_day"
+    assert modality.metadata_scope == "intrinsics"
