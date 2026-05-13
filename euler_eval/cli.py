@@ -151,6 +151,8 @@ def _rgb_eval_axes(*, benchmark: bool = False) -> dict[str, AxisDeclaration]:
 
 _RAYS_EVAL_AXES: dict[str, AxisDeclaration] = {}
 
+_PRED_DEPTH_KEYS = ("depth", "relative_depth", "affine_depth")
+
 # Downstream eval consumers validate metricSet.metricNamespace with a stricter
 # first-segment rule than euler_metric_naming's modality validator. Keep the
 # public Python sparse_depth result keys, but use a wire-compatible metric root
@@ -562,6 +564,34 @@ def print_device_info(requested_device: str, resolved_device: str) -> None:
             pass
 
 
+def _prediction_depth_entry(
+    entry: dict, *, label: str = "Prediction dataset"
+) -> tuple[str | None, dict | None]:
+    """Return the configured dense-depth prediction entry, if any."""
+    matches = [
+        key
+        for key in _PRED_DEPTH_KEYS
+        if key in entry and "path" in entry.get(key, {})
+    ]
+    if not matches:
+        return None, None
+    if len(matches) > 1:
+        raise ValueError(
+            f"{label} contains multiple dense depth entries "
+            f"{matches}. Use only one of {list(_PRED_DEPTH_KEYS)}."
+        )
+    key = matches[0]
+    return key, entry[key]
+
+
+def _prediction_depth_space_hint(key: str | None) -> str | None:
+    if key == "relative_depth":
+        return "relative"
+    if key == "affine_depth":
+        return "affine"
+    return None
+
+
 def validate_gt_config(gt: dict) -> None:
     """Validate the ``gt`` section of the configuration.
 
@@ -619,14 +649,16 @@ def validate_dataset_entry(entry: dict, index: int) -> None:
         raise ValueError(f"{label} must have a 'name' field")
 
     has_rgb = "rgb" in entry and "path" in entry.get("rgb", {})
-    has_depth = "depth" in entry and "path" in entry.get("depth", {})
+    depth_key, _ = _prediction_depth_entry(entry, label=label)
+    has_depth = depth_key is not None
     has_rays = "rays" in entry and "path" in entry.get("rays", {})
     if not has_rgb and not has_depth and not has_rays:
         raise ValueError(
-            f"{label} must have at least 'rgb.path', 'depth.path', or 'rays.path'"
+            f"{label} must have at least 'rgb.path', 'depth.path', "
+            "'relative_depth.path', 'affine_depth.path', or 'rays.path'"
         )
 
-    for modality in ("rgb", "depth", "rays"):
+    for modality in ("rgb", *_PRED_DEPTH_KEYS, "rays"):
         if modality in entry and "path" in entry[modality]:
             p = normalize_modality_path(
                 entry[modality]["path"],
@@ -751,21 +783,24 @@ def save_results(
     """
     output_file = dataset_config.get("output_file")
     if output_file is None:
+        selected_modality = modality
+        if selected_modality == "depth" and "depth" not in dataset_config:
+            selected_modality, _ = _prediction_depth_entry(dataset_config)
         if (
-            modality is not None
-            and modality in dataset_config
-            and "path" in dataset_config[modality]
+            selected_modality is not None
+            and selected_modality in dataset_config
+            and "path" in dataset_config[selected_modality]
         ):
             output_file = (
                 normalize_modality_path(
-                    dataset_config[modality]["path"],
-                    split=dataset_config[modality].get("split"),
+                    dataset_config[selected_modality]["path"],
+                    split=dataset_config[selected_modality].get("split"),
                 )
                 / "eval.json"
             )
         else:
             # Default: save alongside first available modality path
-            for mod in ("depth", "rgb", "rays"):
+            for mod in (*_PRED_DEPTH_KEYS, "rgb", "rays"):
                 if mod in dataset_config and "path" in dataset_config[mod]:
                     output_file = (
                         normalize_modality_path(
@@ -988,7 +1023,8 @@ def main():
     # Evaluate each prediction dataset
     for dataset_config in config["datasets"]:
         ds_name = dataset_config["name"]
-        has_depth = "depth" in dataset_config and "path" in dataset_config["depth"]
+        pred_depth_key, pred_depth_config = _prediction_depth_entry(dataset_config)
+        has_depth = pred_depth_config is not None
         has_rgb = "rgb" in dataset_config and "path" in dataset_config["rgb"]
         has_rays = "rays" in dataset_config and "path" in dataset_config["rays"]
 
@@ -1011,17 +1047,22 @@ def main():
             and not gt_sparse_depth_path
             and not args.skip_depth
         ):
-            pred_depth_path = dataset_config["depth"]["path"]
-            pred_depth_split = dataset_config["depth"].get("split")
+            pred_depth_path = pred_depth_config["path"]
+            pred_depth_split = pred_depth_config.get("split")
             print(f"\n[DEPTH] Evaluating: '{ds_name}'")
             print(f"  GT:   {gt_depth_path}")
             print(f"  Pred: {pred_depth_path}")
+            if pred_depth_key != "depth":
+                print(f"  Pred depth entry: {pred_depth_key}")
 
             depth_dataset = build_depth_eval_dataset(
                 gt_depth_path=gt_depth_path,
                 pred_depth_path=pred_depth_path,
                 calibration_path=calibration_path,
                 segmentation_path=segmentation_path,
+                pred_depth_metadata_scope=(
+                    pred_depth_key if pred_depth_key != "depth" else None
+                ),
                 gt_depth_split=gt_depth_split,
                 pred_depth_split=pred_depth_split,
                 calibration_split=calibration_split,
@@ -1050,6 +1091,7 @@ def main():
                     if args.benchmark_depth_range
                     else None
                 ),
+                input_space_hint=_prediction_depth_space_hint(pred_depth_key),
             )
 
             if sanity_checker is not None:
@@ -1101,6 +1143,7 @@ def main():
                     "pred": {
                         "path": pred_depth_path,
                         "split": pred_depth_split,
+                        "entry": pred_depth_key,
                         "dimensions": depth_spatial.get("pred_dimensions"),
                     },
                     "spatial_alignment": {
@@ -1190,11 +1233,13 @@ def main():
         # -- Sparse pointcloud depth evaluation --
         sparse_depth_dataset = None
         if has_depth and gt_sparse_depth_path and not args.skip_depth:
-            pred_depth_path = dataset_config["depth"]["path"]
-            pred_depth_split = dataset_config["depth"].get("split")
+            pred_depth_path = pred_depth_config["path"]
+            pred_depth_split = pred_depth_config.get("split")
             print(f"\n[SPARSE_DEPTH] Evaluating: '{ds_name}'")
             print(f"  GT sparse pointcloud: {gt_sparse_depth_path}")
             print(f"  Pred dense depth:     {pred_depth_path}")
+            if pred_depth_key != "depth":
+                print(f"  Pred depth entry:     {pred_depth_key}")
             print(f"  Intrinsics:           {intrinsics_path}")
             print(f"  Camera extrinsics:    {camera_extrinsics_path}")
 
@@ -1204,6 +1249,9 @@ def main():
                 intrinsics_path=intrinsics_path,
                 camera_extrinsics_path=camera_extrinsics_path,
                 segmentation_path=segmentation_path,
+                pred_depth_metadata_scope=(
+                    pred_depth_key if pred_depth_key != "depth" else None
+                ),
                 gt_sparse_depth_split=gt_sparse_depth_split,
                 pred_depth_split=pred_depth_split,
                 intrinsics_split=intrinsics_split,
@@ -1231,6 +1279,7 @@ def main():
                     if args.benchmark_depth_range
                     else None
                 ),
+                input_space_hint=_prediction_depth_space_hint(pred_depth_key),
             )
 
             if sanity_checker is not None:
@@ -1277,6 +1326,7 @@ def main():
                     "pred": {
                         "path": pred_depth_path,
                         "split": pred_depth_split,
+                        "entry": pred_depth_key,
                         "dimensions": sparse_depth_spatial.get("pred_dimensions"),
                     },
                     "calibration": {
@@ -1632,7 +1682,11 @@ def main():
 
         # Save per-modality results to respective dataset paths
         if depth_save:
-            depth_out = save_results(depth_save, dataset_config, modality="depth")
+            depth_out = save_results(
+                depth_save,
+                dataset_config,
+                modality=pred_depth_key or "depth",
+            )
             depth_label = (
                 "Sparse depth"
                 if _SPARSE_DEPTH_METRIC_ROOT in depth_save

@@ -571,6 +571,7 @@ def _modality(
     path: str,
     modality_key: str,
     split: Optional[str] = None,
+    metadata_scope: Optional[str] = None,
     loader: Optional[Callable[..., Any]] = None,
     used_as: Optional[str] = None,
 ) -> Modality:
@@ -580,6 +581,7 @@ def _modality(
         loader=loader,
         used_as=used_as,
         modality_key=modality_key,
+        metadata_scope=metadata_scope,
         split=split,
     )
 
@@ -593,6 +595,7 @@ def build_depth_eval_dataset(
     pred_depth_split: Optional[str] = None,
     calibration_split: Optional[str] = None,
     segmentation_split: Optional[str] = None,
+    pred_depth_metadata_scope: Optional[str] = None,
 ) -> MultiModalDataset:
     """Build a MultiModalDataset for depth evaluation.
 
@@ -611,6 +614,9 @@ def build_depth_eval_dataset(
         pred_depth_split: Optional split name for the prediction depth modality.
         calibration_split: Optional split name for the calibration modality.
         segmentation_split: Optional split name for the segmentation modality.
+        pred_depth_metadata_scope: Optional metadata scope for the prediction
+            depth modality, useful when loading depth-like outputs such as
+            ``relative_depth`` or ``affine_depth`` through the depth loader.
 
     Returns:
         A MultiModalDataset instance.
@@ -624,6 +630,7 @@ def build_depth_eval_dataset(
         "pred": _modality(
             path=pred_depth_path,
             modality_key="depth",
+            metadata_scope=pred_depth_metadata_scope,
             used_as="output",
             split=pred_depth_split,
         ),
@@ -662,12 +669,16 @@ def build_sparse_depth_eval_dataset(
     intrinsics_split: Optional[str] = None,
     camera_extrinsics_split: Optional[str] = None,
     segmentation_split: Optional[str] = None,
+    pred_depth_metadata_scope: Optional[str] = None,
 ) -> MultiModalDataset:
     """Build a MultiModalDataset for sparse pointcloud depth evaluation.
 
     The returned dataset yields dense predicted depth under ``"pred"``,
     sparse GT point clouds under ``"gt"``, and hierarchical camera
     calibration under ``"intrinsics"`` and ``"camera_extrinsics"``.
+    ``pred_depth_metadata_scope`` can select a depth-like prediction scope
+    such as ``relative_depth`` or ``affine_depth`` while still loading it
+    as a dense depth map.
     """
     modalities = {
         "gt": _modality(
@@ -678,6 +689,7 @@ def build_sparse_depth_eval_dataset(
         "pred": _modality(
             path=pred_depth_path,
             modality_key="depth",
+            metadata_scope=pred_depth_metadata_scope,
             used_as="output",
             split=pred_depth_split,
         ),

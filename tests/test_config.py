@@ -127,6 +127,35 @@ class TestValidateDatasetEntry:
         }
         validate_dataset_entry(entry, 0)
 
+    def test_valid_relative_depth_only(self, tmp_path):
+        depth_path = tmp_path / "relative_depth"
+        depth_path.mkdir()
+        entry = {
+            "name": "model_a",
+            "relative_depth": {"path": str(depth_path)},
+        }
+        validate_dataset_entry(entry, 0)
+
+    def test_valid_affine_depth_only(self, tmp_path):
+        depth_path = tmp_path / "affine_depth"
+        depth_path.mkdir()
+        entry = {
+            "name": "model_a",
+            "affine_depth": {"path": str(depth_path)},
+        }
+        validate_dataset_entry(entry, 0)
+
+    def test_multiple_depth_prediction_entries_are_rejected(self, tmp_path):
+        for name in ("depth", "relative_depth"):
+            (tmp_path / name).mkdir()
+        entry = {
+            "name": "model_a",
+            "depth": {"path": str(tmp_path / "depth")},
+            "relative_depth": {"path": str(tmp_path / "relative_depth")},
+        }
+        with pytest.raises(ValueError, match="multiple dense depth entries"):
+            validate_dataset_entry(entry, 0)
+
     def test_valid_rgb_only(self, tmp_path):
         rgb_path = tmp_path / "rgb"
         rgb_path.mkdir()

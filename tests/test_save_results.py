@@ -126,6 +126,18 @@ class TestSaveResultsDirectory:
         assert out.exists()
         assert json.loads(out.read_text()) == results
 
+    def test_saves_to_relative_depth_path(self, tmp_path):
+        depth_dir = tmp_path / "pred_relative_depth"
+        depth_dir.mkdir()
+
+        results = {"depth": {"rmse": 0.5}}
+        config = {"name": "model", "relative_depth": {"path": str(depth_dir)}}
+        out = save_results(results, config, modality="depth")
+
+        assert out == depth_dir / "eval.json"
+        assert out.exists()
+        assert json.loads(out.read_text()) == results
+
     def test_saves_to_rgb_path_when_no_depth(self, tmp_path):
         rgb_dir = tmp_path / "pred_rgb"
         rgb_dir.mkdir()

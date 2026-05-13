@@ -107,6 +107,7 @@ def build_modality(
     path: str | Path,
     modality_key: str,
     split: str | None = None,
+    metadata_scope: str | None = None,
     loader=None,
     used_as: str | None = None,
 ) -> Modality:
@@ -114,6 +115,7 @@ def build_modality(
     parsed = parse_modality_path(
         path,
         split=split,
+        metadata_scope=metadata_scope,
     )
     return Modality(
         path=parsed.path,

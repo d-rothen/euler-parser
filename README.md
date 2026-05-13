@@ -203,7 +203,7 @@ Defines GT modalities, prediction datasets to evaluate, and optional euler_train
 
 Each modality entry can optionally include a `split` field to select a specific split from the dataset (e.g. `{ "path": "/data/gt/depth", "split": "test" }`). euler-loading inline selectors are also accepted in `path`, such as `/data/muses.zip:test` or `/data/muses.zip:test#scope=rgb`.
 
-For sparse pointcloud depth evaluation, use `gt.sparse_depth` instead of `gt.depth`. The prediction still uses `datasets[].depth` because the model output is a dense depth map. The evaluator projects the sparse GT point cloud into the prediction image plane using `gt.intrinsics` and `gt.camera_extrinsics`, then computes pointwise depth metrics only at projected valid pixels.
+For sparse pointcloud depth evaluation, use `gt.sparse_depth` instead of `gt.depth`. The prediction uses a dense depth-like map under `datasets[].depth`, `datasets[].relative_depth`, or `datasets[].affine_depth`. The evaluator projects the sparse GT point cloud into the prediction image plane using `gt.intrinsics` and `gt.camera_extrinsics`, then computes pointwise depth metrics only at projected valid pixels.
 
 #### GT section
 
@@ -223,17 +223,21 @@ For sparse pointcloud depth evaluation, use `gt.sparse_depth` instead of `gt.dep
 
 #### Prediction datasets
 
-Each entry in `datasets` can include `rgb`, `depth`, `rays`, or any combination:
+Each entry in `datasets` can include `rgb`, one dense depth-like prediction (`depth`, `relative_depth`, or `affine_depth`), `rays`, or any combination:
 
 | Field | Required | Description |
 |---|---|---|
 | `name` | yes | Display name for this prediction dataset |
 | `rgb.path` | no\* | Path to predicted RGB dataset |
-| `depth.path` | no\* | Path to predicted dense depth dataset; also used when evaluating against sparse pointcloud GT |
+| `depth.path` | no\* | Path to predicted dense metric depth dataset; also used when evaluating against sparse pointcloud GT |
+| `relative_depth.path` | no\* | Path to predicted dense relative depth dataset; evaluated through the same depth pipeline with scale/shift alignment support |
+| `affine_depth.path` | no\* | Path to predicted dense affine-depth dataset; evaluated through the same depth pipeline with scale/shift alignment support |
 | `rays.path` | no\* | Path to predicted ray direction map dataset |
 | `output_file` | no | Custom output path for results JSON (default: `eval.json` inside the first available modality path) |
 
-\* At least one of `rgb.path`, `depth.path`, or `rays.path` is required.
+\* At least one of `rgb.path`, `depth.path`, `relative_depth.path`, `affine_depth.path`, or `rays.path` is required. Use only one dense depth-like entry per prediction dataset.
+
+When `relative_depth` or `affine_depth` is used, `--depth-alignment auto_affine` treats the entry as declared non-metric depth and runs scale/shift alignment even if the raw value range is not normalized. `--depth-alignment none` still disables calibration.
 
 #### `euler_train` section (optional)
 

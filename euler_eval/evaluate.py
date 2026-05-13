@@ -552,6 +552,7 @@ def evaluate_depth_samples(
     sky_mask_enabled: bool = False,
     alignment_mode: str = "auto_affine",
     benchmark_depth_range: Optional[tuple[float, float]] = None,
+    input_space_hint: Optional[str] = None,
 ) -> dict:
     """Evaluate all depth metrics from a MultiModalDataset.
 
@@ -574,6 +575,9 @@ def evaluate_depth_samples(
         benchmark_depth_range: Optional ``(min_meters, max_meters)`` tuple.
             When set, also computes depth metrics for pixels within this
             range, subdivided into square-root-scaled near/mid/far bins.
+        input_space_hint: Optional declaration from the prediction config.
+            ``relative`` or ``affine`` makes ``auto_affine`` run alignment
+            even when values are outside the normalized range.
 
     Returns:
         Dictionary containing depth aggregate/per-file metrics with:
@@ -586,6 +590,12 @@ def evaluate_depth_samples(
         raise ValueError(
             f"Invalid alignment_mode '{alignment_mode}'. "
             f"Expected one of {sorted(valid_alignment_modes)}."
+        )
+    valid_input_space_hints = {None, "relative", "affine"}
+    if input_space_hint not in valid_input_space_hints:
+        raise ValueError(
+            f"Invalid input_space_hint '{input_space_hint}'. "
+            "Expected None, 'relative', or 'affine'."
         )
 
     num_samples = len(dataset)
@@ -1007,7 +1017,14 @@ def evaluate_depth_samples(
                 if i == 0:
                     pred_min = float(np.nanmin(depth_pred))
                     pred_max = float(np.nanmax(depth_pred))
-                    if pred_max <= 1.0 + 1e-3 and pred_min >= -1.0 - 1e-3:
+                    if input_space_hint in {"relative", "affine"}:
+                        normalized_predictions = True
+                        input_space_detected = input_space_hint
+                        print(
+                            f"  Detected native depth space: {input_space_hint} "
+                            f"(declared; range [{pred_min:.3f}, {pred_max:.3f}])"
+                        )
+                    elif pred_max <= 1.0 + 1e-3 and pred_min >= -1.0 - 1e-3:
                         normalized_predictions = True
                         input_space_detected = "normalized"
                         print(
@@ -1496,6 +1513,7 @@ def evaluate_sparse_depth_samples(
     sky_mask_enabled: bool = False,
     alignment_mode: str = "auto_affine",
     benchmark_depth_range: Optional[tuple[float, float]] = None,
+    input_space_hint: Optional[str] = None,
 ) -> dict:
     """Evaluate dense depth predictions against sparse pointcloud GT.
 
@@ -1509,6 +1527,12 @@ def evaluate_sparse_depth_samples(
         raise ValueError(
             f"Invalid alignment_mode '{alignment_mode}'. "
             f"Expected one of {sorted(valid_alignment_modes)}."
+        )
+    valid_input_space_hints = {None, "relative", "affine"}
+    if input_space_hint not in valid_input_space_hints:
+        raise ValueError(
+            f"Invalid input_space_hint '{input_space_hint}'. "
+            "Expected None, 'relative', or 'affine'."
         )
 
     num_samples = len(dataset)
@@ -1700,7 +1724,14 @@ def evaluate_sparse_depth_samples(
                 if i == 0:
                     pred_native_dims = depth_pred.shape[:2]
                     finite_pred = depth_pred[np.isfinite(depth_pred)]
-                    if finite_pred.size and finite_pred.max() <= 1.0 + 1e-3 and finite_pred.min() >= -1.0 - 1e-3:
+                    if input_space_hint in {"relative", "affine"} and finite_pred.size:
+                        normalized_predictions = True
+                        input_space_detected = input_space_hint
+                        print(
+                            f"  Detected native depth space: {input_space_hint} "
+                            f"(declared; range [{float(finite_pred.min()):.3f}, {float(finite_pred.max()):.3f}])"
+                        )
+                    elif finite_pred.size and finite_pred.max() <= 1.0 + 1e-3 and finite_pred.min() >= -1.0 - 1e-3:
                         normalized_predictions = True
                         input_space_detected = "normalized"
                         print(

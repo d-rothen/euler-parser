@@ -99,6 +99,22 @@ class _ZeroValidSparseDataset(_OneSampleSparseDataset):
         self.pred = np.zeros((3, 3), dtype=np.float32)
 
 
+class _RelativeSparseDataset(_OneSampleSparseDataset):
+    def __init__(self):
+        super().__init__()
+        self.pred = np.zeros((3, 3), dtype=np.float32)
+        self.pred[1, 1] = (np.sqrt(12.0) - 3.0) / 2.0
+        self.pred[1, 2] = (np.sqrt(24.0) - 3.0) / 2.0
+
+
+class _AffineSparseDataset(_OneSampleSparseDataset):
+    def __init__(self):
+        super().__init__()
+        self.pred = np.zeros((3, 3), dtype=np.float32)
+        self.pred[1, 1] = np.sqrt(12.0) * 10.0 + 7.0
+        self.pred[1, 2] = np.sqrt(24.0) * 10.0 + 7.0
+
+
 def test_sparse_depth_eval_reports_only_pointwise_depth_metrics():
     dataset = _OneSampleSparseDataset()
 
@@ -117,6 +133,50 @@ def test_sparse_depth_eval_reports_only_pointwise_depth_metrics():
     np.testing.assert_allclose(metrics["standard"]["pixel_pool"]["absrel"], 0.0)
     np.testing.assert_allclose(metrics["standard"]["pixel_pool"]["delta1"], 1.0)
     np.testing.assert_allclose(metrics["depth_metrics"]["rmse"]["median"], 0.0)
+
+
+def test_sparse_depth_eval_auto_affine_aligns_relative_depth():
+    result = evaluate_sparse_depth_samples(
+        _RelativeSparseDataset(),
+        pred_is_radial=True,
+        num_workers=0,
+        alignment_mode="auto_affine",
+    )
+
+    assert result["space_info"]["input_space_detected"] == "normalized"
+    assert result["space_info"]["calibration_applied"] is True
+    assert result["space_info"]["emitted_spaces"] == ["native", "metric"]
+
+    native_rmse = result["sparse_depth_native"]["depth_metrics"]["rmse"]["median"]
+    metric_rmse = result["sparse_depth_metric"]["depth_metrics"]["rmse"]["median"]
+    assert metric_rmse < native_rmse
+    np.testing.assert_allclose(metric_rmse, 0.0, atol=1e-6)
+
+    per_file = result["per_file_metrics"]["files"][0]["metrics"]
+    assert "sparse_depth_native" in per_file
+    assert "sparse_depth_metric" in per_file
+    assert (
+        per_file["sparse_depth_metric"]["depth_metrics"]["rmse"]
+        < per_file["sparse_depth_native"]["depth_metrics"]["rmse"]
+    )
+
+
+def test_sparse_depth_eval_auto_affine_uses_declared_affine_depth_hint():
+    result = evaluate_sparse_depth_samples(
+        _AffineSparseDataset(),
+        pred_is_radial=True,
+        num_workers=0,
+        alignment_mode="auto_affine",
+        input_space_hint="affine",
+    )
+
+    assert result["space_info"]["input_space_detected"] == "affine"
+    assert result["space_info"]["calibration_applied"] is True
+
+    native_rmse = result["sparse_depth_native"]["depth_metrics"]["rmse"]["median"]
+    metric_rmse = result["sparse_depth_metric"]["depth_metrics"]["rmse"]["median"]
+    assert metric_rmse < native_rmse
+    np.testing.assert_allclose(metric_rmse, 0.0, atol=1e-5)
 
 
 def test_sparse_depth_per_file_reports_zero_valid_support():

@@ -15,8 +15,10 @@ def _install_captured_dataset(monkeypatch):
     monkeypatch.setattr(data, "MultiModalDataset", _CapturedDataset)
 
 
-def _assert_modality(modality, *, key, split=None, used_as=None, loader=None):
-    assert modality.metadata_scope == key
+def _assert_modality(
+    modality, *, key, split=None, used_as=None, loader=None, scope=None
+):
+    assert modality.metadata_scope == (scope or key)
     assert modality.modality_type == key
     assert modality.split == split
     assert modality.used_as == used_as
@@ -97,6 +99,25 @@ def test_sparse_depth_builder_sets_projection_modality_scopes(monkeypatch):
         dataset.hierarchical_modalities["camera_extrinsics"],
         key="camera_extrinsics",
         split="pose",
+    )
+
+
+def test_sparse_depth_builder_can_load_relative_depth_prediction_scope(monkeypatch):
+    _install_captured_dataset(monkeypatch)
+
+    dataset = data.build_sparse_depth_eval_dataset(
+        gt_sparse_depth_path="/datasets/shared",
+        pred_depth_path="/predictions/shared",
+        intrinsics_path="/datasets/shared",
+        camera_extrinsics_path="/datasets/shared",
+        pred_depth_metadata_scope="relative_depth",
+    )
+
+    _assert_modality(
+        dataset.modalities["pred"],
+        key="depth",
+        scope="relative_depth",
+        used_as="output",
     )
 
 
