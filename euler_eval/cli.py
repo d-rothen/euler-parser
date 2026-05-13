@@ -13,6 +13,7 @@ import zipfile
 from pathlib import Path
 
 import torch
+from euler_loading import Modality
 
 from .data import (
     build_depth_eval_dataset,
@@ -38,6 +39,22 @@ except ImportError:
     _euler_train = None
 
 from euler_metric_naming import AxisDeclaration, MetricDescription, MetricNamespace
+
+
+def _normalize_modality_path(
+    path: str | Path,
+    *,
+    modality_key: str,
+    split: str | None = None,
+) -> Path:
+    """Return the filesystem/archive root for an euler-loading modality path."""
+    modality = Modality(
+        str(path),
+        modality_type=modality_key,
+        metadata_scope=modality_key,
+        split=split,
+    )
+    return Path(modality.path)
 
 
 # ── Eval namespace ──────────────────────────────────────────────────────────
@@ -599,7 +616,11 @@ def validate_gt_config(gt: dict) -> None:
         "camera_extrinsics",
     ):
         if modality in gt and "path" in gt[modality]:
-            p = Path(gt[modality]["path"])
+            p = _normalize_modality_path(
+                gt[modality]["path"],
+                modality_key=modality,
+                split=gt[modality].get("split"),
+            )
             if not p.exists():
                 raise ValueError(f"gt.{modality}.path does not exist: {p}")
 
@@ -624,7 +645,11 @@ def validate_dataset_entry(entry: dict, index: int) -> None:
 
     for modality in ("rgb", "depth", "rays"):
         if modality in entry and "path" in entry[modality]:
-            p = Path(entry[modality]["path"])
+            p = _normalize_modality_path(
+                entry[modality]["path"],
+                modality_key=modality,
+                split=entry[modality].get("split"),
+            )
             if not p.exists():
                 raise ValueError(f"{label}.{modality}.path does not exist: {p}")
 
@@ -749,12 +774,26 @@ def save_results(
             and modality in dataset_config
             and "path" in dataset_config[modality]
         ):
-            output_file = Path(dataset_config[modality]["path"]) / "eval.json"
+            output_file = (
+                _normalize_modality_path(
+                    dataset_config[modality]["path"],
+                    modality_key=modality,
+                    split=dataset_config[modality].get("split"),
+                )
+                / "eval.json"
+            )
         else:
             # Default: save alongside first available modality path
             for mod in ("depth", "rgb", "rays"):
                 if mod in dataset_config and "path" in dataset_config[mod]:
-                    output_file = Path(dataset_config[mod]["path"]) / "eval.json"
+                    output_file = (
+                        _normalize_modality_path(
+                            dataset_config[mod]["path"],
+                            modality_key=mod,
+                            split=dataset_config[mod].get("split"),
+                        )
+                        / "eval.json"
+                    )
                     break
         if output_file is None:
             output_file = Path("eval.json")

@@ -214,6 +214,21 @@ class TestSaveResultsZip:
             stored = json.loads(zf.read("eval.json"))
             assert stored == results
 
+    def test_inline_zip_split_writes_eval_json_into_zip(self, tmp_path):
+        zp = tmp_path / "dataset.zip"
+        with zipfile.ZipFile(zp, "w") as zf:
+            zf.writestr("image_001.png", b"\x89PNG")
+
+        results = {"depth": {"rmse": 0.42}}
+        config = {"name": "model", "depth": {"path": f"{zp}:fog_day"}}
+        out = save_results(results, config)
+
+        assert out == zp / "eval.json"
+        with zipfile.ZipFile(zp, "r") as zf:
+            assert "eval.json" in zf.namelist()
+            stored = json.loads(zf.read("eval.json"))
+            assert stored == results
+
     def test_preserves_existing_zip_contents(self, tmp_path):
         zp = tmp_path / "dataset.zip"
         with zipfile.ZipFile(zp, "w") as zf:

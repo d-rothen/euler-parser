@@ -169,3 +169,26 @@ def test_sky_mask_loader_resolution_uses_segmentation_scope(monkeypatch):
     assert calls == [
         ("/datasets/shared", {"metadata_scope": "segmentation"}),
     ]
+
+
+def test_sky_mask_loader_resolution_strips_inline_split(monkeypatch):
+    calls = []
+
+    def fake_index_dataset_from_path(path, **kwargs):
+        calls.append((path, kwargs))
+        return {"euler_loading": {"loader": "vkitti2"}}
+
+    def sky_mask(path, meta=None):
+        return None
+
+    monkeypatch.setattr(data, "index_dataset_from_path", fake_index_dataset_from_path)
+    monkeypatch.setattr(
+        data,
+        "resolve_loader_module",
+        lambda name: SimpleNamespace(sky_mask=sky_mask),
+    )
+
+    assert data._resolve_sky_mask_loader("/datasets/shared.zip:fog_day") is sky_mask
+    assert calls == [
+        ("/datasets/shared.zip", {"metadata_scope": "segmentation"}),
+    ]

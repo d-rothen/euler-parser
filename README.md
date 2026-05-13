@@ -201,7 +201,7 @@ Defines GT modalities, prediction datasets to evaluate, and optional euler_train
 }
 ```
 
-Each modality entry can optionally include a `split` field to select a specific split from the dataset (e.g. `{ "path": "/data/gt/depth", "split": "test" }`).
+Each modality entry can optionally include a `split` field to select a specific split from the dataset (e.g. `{ "path": "/data/gt/depth", "split": "test" }`). euler-loading inline selectors are also accepted in `path`, such as `/data/muses.zip:test` or `/data/muses.zip:test#scope=rgb`.
 
 For sparse pointcloud depth evaluation, use `gt.sparse_depth` instead of `gt.depth`. The prediction still uses `datasets[].depth` because the model output is a dense depth map. The evaluator projects the sparse GT point cloud into the prediction image plane using `gt.intrinsics` and `gt.camera_extrinsics`, then computes pointwise depth metrics only at projected valid pixels.
 
@@ -255,7 +255,7 @@ Dataset metadata (e.g. `radial_depth`, `rgb_range`, sparse point columns, and co
 
 ### Dataset Metadata
 
-Each dataset directory must contain ds-crawler metadata artifacts, typically generated under `.ds_crawler/`:
+Each dataset directory or archive must contain ds-crawler metadata artifacts, typically generated under `.ds_crawler/`:
 
 ```text
 dataset-root/
@@ -264,6 +264,8 @@ dataset-root/
     ds-crawler.json
     index.json
 ```
+
+When one physical root or archive contains several logical modalities, the artifacts may instead be scoped under `.ds_crawler/<modality>/` with a `.ds_crawler/scopes.json` manifest. `euler-eval` passes modality scopes to euler-loading so paths such as `/data/muses.zip:test` can load `.ds_crawler/rgb/index.json`, `.ds_crawler/depth/index.json`, and related scoped artifacts from the same archive.
 
 GT and prediction datasets are matched by hierarchy path and file ID through `MultiModalDataset`.
 

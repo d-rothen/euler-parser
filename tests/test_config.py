@@ -1,6 +1,7 @@
 """Tests for main.py config validation."""
 
 import json
+import zipfile
 import pytest
 
 from euler_eval.cli import load_config, validate_dataset_entry, validate_gt_config
@@ -48,6 +49,20 @@ class TestValidateGtConfig:
         rgb_path = tmp_path / "rgb"
         rgb_path.mkdir()
         gt = {"rgb": {"path": str(rgb_path)}}
+        validate_gt_config(gt)
+
+    def test_inline_zip_split_gt_path_is_valid(self, tmp_path):
+        rgb_path = tmp_path / "reference.zip"
+        with zipfile.ZipFile(rgb_path, "w") as zf:
+            zf.writestr("dummy.txt", "x")
+        gt = {"rgb": {"path": f"{rgb_path}:fog_day"}}
+        validate_gt_config(gt)
+
+    def test_inline_scope_gt_path_is_valid(self, tmp_path):
+        rgb_path = tmp_path / "reference.zip"
+        with zipfile.ZipFile(rgb_path, "w") as zf:
+            zf.writestr("dummy.txt", "x")
+        gt = {"rgb": {"path": f"{rgb_path}#scope=rgb"}}
         validate_gt_config(gt)
 
     def test_sparse_depth_requires_projection_modalities(self, tmp_path):
@@ -131,6 +146,16 @@ class TestValidateDatasetEntry:
         }
         with pytest.raises(ValueError, match="does not exist"):
             validate_dataset_entry(entry, 0)
+
+    def test_inline_zip_split_dataset_path_is_valid(self, tmp_path):
+        rgb_path = tmp_path / "prediction.zip"
+        with zipfile.ZipFile(rgb_path, "w") as zf:
+            zf.writestr("dummy.txt", "x")
+        entry = {
+            "name": "model_a",
+            "rgb": {"path": f"{rgb_path}:fog_day"},
+        }
+        validate_dataset_entry(entry, 0)
 
     def test_index_in_error_message(self, tmp_path):
         entry = {"name": "test"}

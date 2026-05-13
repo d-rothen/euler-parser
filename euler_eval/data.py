@@ -525,13 +525,14 @@ def _resolve_sky_mask_loader(segmentation_path: str) -> Callable[..., Any]:
     its ``sky_mask`` function so that raw class-segmentation data is
     converted to a boolean sky mask at load time.
     """
+    modality = _modality(path=segmentation_path, modality_key="segmentation")
     try:
         index = index_dataset_from_path(
-            segmentation_path,
-            metadata_scope="segmentation",
+            modality.path,
+            metadata_scope=modality.metadata_scope,
         )
     except FileNotFoundError:
-        index = index_dataset_from_path(segmentation_path)
+        index = index_dataset_from_path(modality.path)
     # Resolve euler_loading metadata the same way euler-loading does:
     # try the contract addon API first (handles addons.euler_loading),
     # then fall back to top-level euler_loading for legacy indices.
@@ -546,14 +547,14 @@ def _resolve_sky_mask_loader(segmentation_path: str) -> Callable[..., Any]:
     loader_name = euler_meta.get("loader")
     if loader_name is None:
         raise ValueError(
-            f"Segmentation dataset at {segmentation_path!r} does not declare "
+            f"Segmentation dataset at {modality.path!r} does not declare "
             f"an 'euler_loading.loader' in its ds-crawler index."
         )
     module = resolve_loader_module(loader_name)
     sky_fn = getattr(module, "sky_mask", None)
     if sky_fn is None or not callable(sky_fn):
         raise ValueError(
-            f"Loader module {loader_name!r} (resolved from {segmentation_path!r}) "
+            f"Loader module {loader_name!r} (resolved from {modality.path!r}) "
             f"does not expose a 'sky_mask' function."
         )
     return sky_fn
